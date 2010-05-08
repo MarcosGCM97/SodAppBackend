@@ -3,7 +3,7 @@
 // Compatible with older PHP versions (5.6+)
 
 // load DB connection from project
-require_once __DIR__ . '/conexion.php';
+require_once __DIR__ . '/../../conexion.php';
 
 $db = new Database();
 

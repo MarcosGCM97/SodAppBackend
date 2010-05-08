@@ -9,9 +9,9 @@ class Database {
    public function __construct() {
        // Cargar configuración desde variable de entorno o archivo
        $this->host = getenv('DB_HOST') ?: 'localhost';
-       $this->db = getenv('DB_NAME') ?: 'c2761775_sodapp';
-       $this->user = getenv('DB_USER') ?: 'c2761775_sodapp';
-       $this->pwd = getenv('DB_PASS') ?: 'TUfiresi31';
+       $this->db = getenv('DB_NAME') ?: 'sodapp';
+       $this->user = getenv('DB_USER') ?: 'marcos';
+       $this->pwd = getenv('DB_PASS') ?: 'root';
    }
 
    public function connect() {

@@ -1,10 +1,12 @@
 <?php
-require_once __DIR__ . 'Contacto.php';
-require_once './Deuda.php';
+
+require_once __DIR__ .  '/../../Persona/Entidad/Persona.php';
+require_once __DIR__ .  '/../../Persona/Entidad/Contacto.php';
+require_once  __DIR__ . '/../../Cliente/Entidad/Deuda.php';
 
 class Cliente extends Persona {
 
-	private $id
+	private $id;
     private $fechaDesde;
     private $fechaHasta;
     private $deuda;

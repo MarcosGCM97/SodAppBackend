@@ -4,11 +4,11 @@ require_once __DIR__ . '/Persona.php';
 class Usuario extends Persona{
 	private $id;
     private $usuario;
-    private $contrasena;
+    private $pass;
 
     public function __construct(String $usuario, String $contrasena) {
         $this->usuario = $usuario;
-        $this->contrasena = $contrasena;
+        $this->pass = $pass;
     }
     
     public function getId() {
@@ -25,11 +25,11 @@ class Usuario extends Persona{
         return $this;
     }
 
-    public function getContrasena() {
-        return $this->contrasena;
+    public function getPass() {
+        return $this->pass;
     }
 
-    public function setContrasena(String $contrasena) {
-        $this->contrasena = $contrasena;
+    public function setPass(String $pass) {
+        $this->pass = $pass;
     }
 }

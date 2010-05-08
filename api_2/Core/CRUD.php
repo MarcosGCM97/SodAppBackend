@@ -5,7 +5,7 @@ require_once __DIR__ . '../../Core/auth.php';
 
 public function startPetition(
 	String $metodo, 
-	String $query, 
+	String $funtion, 
 	String $entidad, 
 	Array $body 
 ) {

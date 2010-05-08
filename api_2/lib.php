@@ -64,4 +64,3 @@ function prepare_or_fail($con, $query) {
     return $stmt;
 }
 
-?>
