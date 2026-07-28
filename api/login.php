@@ -1,10 +1,63 @@
 <?php
 require_once __DIR__ . '/lib.php';
+require_once __DIR__ . '/jwt.php';
 allow_cors();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
+if ($method === 'POST') {    
+    $data = get_json_input();
 
+    if (!isset($data['nombreUs']) || !isset($data['contrasenaUs'])) {
+        send_json(["success" => false, "error" => "Datos incompletos"], 400);
+        return;
+    }
+
+    $nombre = $data['nombreUs'];
+    $pass = $data['contrasenaUs'];
+
+    $query = "SELECT * FROM sap_us00 WHERE us_nom = ?";
+    $stmt = prepare_or_fail($con, $query);
+    mysqli_stmt_bind_param($stmt, 's', $nombre);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+
+    if ($result && $usuarioDB = mysqli_fetch_assoc($result)) {
+        if (password_verify($pass, $usuarioDB['us_pas'])) {
+            // prepare token payload (do not include password)
+            // detect role column if present, fall back to 'user'
+            $role = 'user';
+            foreach (['role','rol','us_rol','us_tipo','is_admin','admin'] as $rk) {
+                if (isset($usuarioDB[$rk])) {
+                    $role = $usuarioDB[$rk];
+                    break;
+                }
+            }
+            if ($role === '1' || $role === 1) $role = 'admin';
+
+            $payload = [
+                'us_ide' => intval($usuarioDB['us_ide']),
+                'us_nom' => $usuarioDB['us_nom'],
+                'role' => $role
+            ];
+            $token = generate_jwt($payload);
+
+            // remove sensitive fields
+            if (isset($usuarioDB['us_pas'])) unset($usuarioDB['us_pas']);
+
+            send_json([
+                "success" => true,
+                "message" => "Usuario encontrado.",
+                "usuario" => $usuarioDB,
+                "token" => $token
+            ], 200);
+        } else {
+            send_json(["success" => false, "error" => "Contraseña incorrecta."], 401);
+        }
+    } else {
+        send_json(["success" => false, "error" => "Usuario no encontrado."], 404);
+    }
+}
 if ($method === 'GET') {    
     //$data = get_json_input();
 
@@ -25,10 +78,30 @@ if ($method === 'GET') {
 
     if ($result && $usuarioDB = mysqli_fetch_assoc($result)) {
         if (password_verify($pass, $usuarioDB['us_pas'])) {
+            // detect role column if present
+            $role = 'user';
+            foreach (['role','rol','us_rol','us_tipo','is_admin','admin'] as $rk) {
+                if (isset($usuarioDB[$rk])) {
+                    $role = $usuarioDB[$rk];
+                    break;
+                }
+            }
+            if ($role === '1' || $role === 1) $role = 'admin';
+
+            $payload = [
+                'us_ide' => intval($usuarioDB['us_ide']),
+                'us_nom' => $usuarioDB['us_nom'],
+                'role' => $role
+            ];
+            $token = generate_jwt($payload);
+
+            if (isset($usuarioDB['us_pas'])) unset($usuarioDB['us_pas']);
+
             send_json([
                 "success" => true,
                 "message" => "Usuario encontrado.",
-                "usuario" => $usuarioDB
+                "usuario" => $usuarioDB,
+                "token" => $token
             ], 200);
         } else {
             send_json([

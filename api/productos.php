@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/lib.php';
+require_once __DIR__ . '/auth.php';
 allow_cors();
 
 $method = $_SERVER['REQUEST_METHOD'];
@@ -9,7 +10,7 @@ if ($method === 'GET') {
 
         $nombre = $_GET['nombre'];
 
-        $stmt = prepare_or_fail($con, 'SELECT * FROM sap_pr00 WHERE updated_at IS NULL AND pr_nom = ?');
+        $stmt = prepare_or_fail($con, 'SELECT * FROM sap_pr00 WHERE deleted_at IS NULL AND pr_nom = ?');
        
         mysqli_stmt_bind_param($stmt, 's', $nombre);
 
@@ -23,7 +24,7 @@ if ($method === 'GET') {
 
         send_json(["success" => false, "error" => "Producto no encontrado"], 404);
     } else {
-        $res = mysqli_query($con, 'SELECT * FROM sap_pr00 WHERE updated_at IS NULL');
+        $res = mysqli_query($con, 'SELECT * FROM sap_pr00 WHERE deleted_at IS NULL');
 
         if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
@@ -36,13 +37,15 @@ if ($method === 'GET') {
 }
 
 if ($method === 'POST') {
+    // require auth for creating products
+    require_auth();
     $data = get_json_input();
 
     $nombre = isset($data['nombrePr']) ? $data['nombrePr'] : (isset($data['name']) ? $data['name'] : null);
     
-    $precio = isset($data['precioPr']) ? $data['precioPr'] : (isset($data['price']) ? $data['price'] : null);
+    $precio = isset($data['precioUni']) ? $data['precioUni'] : (isset($data['price']) ? $data['price'] : null);
     
-    $cantidad = isset($data['cantidadPr']) ? $data['cantidadPr'] : (isset($data['stock']) ? $data['stock'] : null);
+    $cantidad = isset($data['stock']) ? $data['stock'] : (isset($data['stock']) ? $data['stock'] : null);
     
     if (!$nombre || $precio === null || $cantidad === null) send_json(["success" => false, "error" => "Datos incompletos"], 400);
 
@@ -57,7 +60,7 @@ if ($method === 'POST') {
 
     if ($resCheck && mysqli_num_rows($resCheck) > 0) send_json(["success"=>false,"error"=>"Ya existe producto"],400);
 
-    $stmt = prepare_or_fail($con, 'INSERT INTO sap_pr00 SET pr_nom = ?, pr_val = ?, pr_stk = ?, created_at = cur_date()');
+    $stmt = prepare_or_fail($con, 'INSERT INTO sap_pr00 SET pr_nom = ?, pr_val = ?, pr_stk = ?, created_at = CURDATE()');
 
     mysqli_stmt_bind_param($stmt, 'sdi', $nombre, $precio, $cantidad);
 
@@ -67,63 +70,56 @@ if ($method === 'POST') {
 }
 
 if ($method === 'PUT') {
-    //SE CREA UN NUEVO PRODUCTO, CON UN NUEVO PRECIO Y EL PRODUCTO ORIGINAL SE DESACTIVA
+    // require auth for updating products
+    require_auth();
     $data = get_json_input();
 
-    $nombre = isset($data['nombre']) ? $data['nombre'] : (isset($data['name']) ? $data['name'] : null);
+    $nombre = isset($data['nombrePr']) ? $data['nombrePr'] : (isset($data['name']) ? $data['name'] : (isset($data['nombre']) ? $data['nombre'] : null));
 
-    $precio = isset($data['precio']) ? $data['precio'] : (isset($data['price']) ? $data['price'] : null);
+    $precio = isset($data['precioUni']) ? $data['precioUni'] : (isset($data['price']) ? $data['price'] : null);
 
-    $cantidad = isset($data['cantidad']) ? $data['cantidad'] : (isset($data['stock']) ? $data['stock'] : null);
+    $cantidad = isset($data['stock']) ? $data['stock'] : (isset($data['cantidad']) ? $data['cantidad'] : null);
 
     if (!$nombre || $precio === null || $cantidad === null) send_json(["success" => false, "error" => "Datos incompletos"], 400);
-    
-    // begin transaction (best effort)
-    mysqli_autocommit($con, false);
 
-    //update prod original
-    $stmt = prepare_or_fail($con, 'UPDATE sap_pr00 SET updated_at = cur_date() WHERE pr_nom = ?');
+    $precio = floatval($precio);
+    $cantidad = intval($cantidad);
 
-    mysqli_stmt_bind_param($stmt, 's', $nombre);
+    $stmt = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_val = ?, pr_stk = ? WHERE pr_nom = ? AND updated_at IS NULL');
 
-    if (! mysqli_stmt_execute($stmt)) {
-        mysqli_rollback($con);
+    mysqli_stmt_bind_param($stmt, 'dis', $precio, $cantidad, $nombre);
 
+    if (mysqli_stmt_execute($stmt)) {
+        if (mysqli_stmt_affected_rows($stmt) > 0) {
+            send_json(["success"=>true,"message"=>"Producto actualizado"]);
+        } else {
+            send_json(["success"=>false,"error"=>"Producto no encontrado"],404);
+        }
+    } else {
         send_json(["success"=>false,"error"=>mysqli_stmt_error($stmt)],500);
     }
-
-    $stmt2 = prepare_or_fail($con, 'INSERT INTO sap_pr00  (pr_nom, pr_val, pr_stk, created_at) VALUES (?, ?, ?, cur_date())');
-
-    mysqli_stmt_bind_param($stmt2, 'sdi', $nombre, $precio, $cantidad);
-
-    if (! mysqli_stmt_execute($stmt2)) {
-        mysqli_rollback($con);
-
-        send_json(["success"=>false,"error"=>mysqli_stmt_error($stmt)],500);
-    }
-    
-    mysqli_commit($con);
-    mysqli_autocommit($con, true);
-    
-    send_json(["success"=>true,"message"=>"Producto actualizado"]);
 }
 
 if ($method === 'DELETE') {
+    // require auth for deleting products
+    require_auth();
     $nombre = isset($_GET['nombre']) ? $_GET['nombre'] : '';
 
     if ($nombre === '') send_json(["success"=>false,"error"=>"Nombre requerido"],400);
 
-    $stmt = prepare_or_fail($con, 'UPDATE FROM sap_pr00 SET deleted_at = cur_date() WHERE pr_nom = ?');
+    $stmt = prepare_or_fail($con, 'UPDATE sap_pr00 SET deleted_at = CURDATE() WHERE pr_nom = ?');
 
     mysqli_stmt_bind_param($stmt, 's', $nombre);
 
     if (mysqli_stmt_execute($stmt)) {
-        if ($stmt->affected_rows > 0) send_json(["success"=>true,"message"=>"Producto eliminado"]);
-
-        send_json(["success"=>false,"error"=>"Producto no encontrado"],404);
+        if (mysqli_stmt_affected_rows($stmt) > 0) {
+            send_json(["success"=>true,"message"=>"Producto eliminado"]);
+        } else {
+            send_json(["success"=>false,"error"=>"Producto no encontrado"],404);
+        }
+    } else {
+        send_json(["success"=>false,"error"=>mysqli_stmt_error($stmt)],500);
     }
-    
-    send_json(["success"=>false,"error"=>mysqli_stmt_error($stmt)],500);
 }
 
 send_json(["success"=>false,"error"=>"Método no soportado"],405);

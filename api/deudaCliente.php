@@ -1,5 +1,6 @@
 <?php
 require_once('lib.php');
+require_once __DIR__ . '/auth.php';
 
 allow_cors();
 
@@ -8,36 +9,41 @@ $method = $_SERVER['REQUEST_METHOD'];
 //GET /api/deuda.php?id=1
 if ($method === 'GET') {
     $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
-    
-    $deuda = isset($_GET['deuda']) ? doubleval($_GET['deuda']) : 0;
-    
-    if ($id <= 0) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
-    //Buscar deuda existente
-    $stmtDeudaActual = prepare_or_fail($con, 'SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?');
+    // If id provided, return single debtor
+    if ($id > 0) {
+        $stmt = prepare_or_fail($con, 'SELECT cl_ide, cl_nom, cl_deb FROM sap_cl00 WHERE cl_ide = ? AND is_deleted = 0');
+        mysqli_stmt_bind_param($stmt, 'i', $id);
+        mysqli_stmt_execute($stmt);
+        $res = mysqli_stmt_get_result($stmt);
+        $row = mysqli_fetch_assoc($res);
+        if ($row) send_json(["success" => true, "deudor" => $row]);
+        send_json(["success" => false, "error" => "Cliente no encontrado"], 404);
+    }
 
-    mysqli_stmt_bind_param($stmtDeudaActual, 'i', $id);
+    // Otherwise list debtors
+    $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_deb FROM sap_cl00 WHERE cl_deb > 0 AND is_deleted = 0');
+    if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
-    mysqli_stmt_execute($stmtDeudaActual);
-
-    $deudaActual = mysqli_stmt_get_result($stmtDeudaActual);
-    
     $arr = [];
-    
     while ($r = mysqli_fetch_assoc($res)) $arr[] = $r;
-    
+
     send_json(["success" => true, "deudores" => $arr]);
 }
 
 if ($method === "PUT") {
-    $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
+    // require auth for updating debt
+    require_auth();
+    $data = get_json_input();
+
+    $id = isset($data['id']) ? intval($data['id']) : 0;
 
     if ($id <= 0) send_json(["success" => false, "error" => "ID inválido"], 400);
 
-    $totalDeuda = isset($_GET['deuda']) ? doubleval($_GET['deuda']) : 0;
+    $totalDeuda = isset($data['deuda']) ? floatval($data['deuda']) : 0;
 
-    if (!$totalDeuda || $totalDeuda < 0) {
-        send_json(["success" => false, "error" => "La deuda no puede ser negativa"], 400);
+    if ($totalDeuda <= 0) {
+        send_json(["success" => false, "error" => "La deuda debe ser mayor a 0"], 400);
     }
 
     $queryUpdateDeuda = "

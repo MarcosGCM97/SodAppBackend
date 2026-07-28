@@ -1,31 +1,36 @@
 <?php
 
 class Database {
-   private $host ="127.0.0.1";
-   private $db ="sodapp";
-   private $user ="root";
-   private $pwd ="";
+   private $host;
+   private $db;
+   private $user;
+   private $pwd;
+
+   public function __construct() {
+       // Cargar configuración desde variable de entorno o archivo
+       $this->host = getenv('DB_HOST') ?: 'localhost';
+       $this->db = getenv('DB_NAME') ?: 'c2761775_sodapp';
+       $this->user = getenv('DB_USER') ?: 'c2761775_sodapp';
+       $this->pwd = getenv('DB_PASS') ?: 'TUfiresi31';
+   }
 
    public function connect() {
-       $con = mysqli_connect($this->host, $this->user, $this->pwd, $this->db);
+      $con = mysqli_connect($this->host, $this->user, $this->pwd, $this->db);
 
-       if (!$con->set_charset("utf8")) {
+      // VALIDAR PRIMERO si la conexión fue exitosa
+      if (!$con || mysqli_connect_errno()) {
+         $error = "Error al conectarse con MySQL: " . mysqli_connect_error();
+         error_log($error);
+         die(json_encode(['error' => $error], JSON_UNESCAPED_UNICODE));
+      }
 
-          printf("Error cargando el conjunto de caracteres utf8: %s\n", $con->error);
-       } else {
-          // Para diagnosticar si algo anda mal con la codificación
-          //printf("Conjunto de caracteres actual: %s\n", $con->character_set_name());
-          //echo "<br>";
-       }
-       $con->query('SET NAMES utf8');
-
-       // verifica conexion
-       if(mysqli_connect_errno()) {
-
-          die("Error al conectarse con MySQL: " . mysqli_connect_error());
-
-       }
-       return $con;
+      // Ahora sí puedes usar $con
+      if (!$con->set_charset("utf8")) {
+         printf("Error cargando charset utf8: %s\n", $con->error);
+      }
+      
+      $con->query('SET NAMES utf8');
+      return $con;
    }
 }
 

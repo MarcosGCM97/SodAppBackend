@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/lib.php';
+require_once __DIR__ . '/auth.php';
 
 allow_cors();
 
@@ -12,7 +13,7 @@ if ($method === 'GET') {
 
         $id = intval($_GET['id']);
 
-        $stmt = prepare_or_fail($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp FROM sap_cl00 WHERE cl_ide = ?');
+        $stmt = prepare_or_fail($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp FROM sap_cl00 WHERE cl_ide = ? AND is_deleted = 0');
 
         mysqli_stmt_bind_param($stmt, 'i', $id);
 
@@ -26,7 +27,7 @@ if ($method === 'GET') {
 
         send_json(["success" => false, "error" => "Cliente no encontrado"], 404);
     } else {
-        $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp FROM sap_cl00 ORDER BY cl_nom');
+        $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp FROM sap_cl00 WHERE is_deleted = 0 ORDER BY cl_nom');
 
         if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
@@ -40,6 +41,8 @@ if ($method === 'GET') {
 
 // POST: crear cliente. JSON: {"nombreCl":"...","numTelCl":"...","direccionCl":"..."}
 if ($method === 'POST') {
+    // require auth for creating clients
+    require_auth();
     $data = get_json_input();
 
     $nombre = isset($data['nombreCl']) ? $data['nombreCl'] : (isset($data['name']) ? $data['name'] : null);
@@ -63,6 +66,8 @@ if ($method === 'POST') {
 
 // PUT: actualizar cliente (body JSON with id and fields)
 if ($method === 'PUT') {
+    // require auth for updating clients
+    require_auth();
     $data = get_json_input();
 
     $id = isset($data['id']) ? intval($data['id']) : 0;
@@ -88,13 +93,15 @@ if ($method === 'PUT') {
     send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
 }
 
-// DELETE: /api/clients.php?id=1
+// DELETE: /api/clients.php?id=1 (Soft Delete)
 if ($method === 'DELETE') {
+    // require auth for deleting clients
+    require_auth();
     $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
 
     if ($id <= 0) send_json(["success" => false, "error" => "ID inválido"], 400);
 
-    $stmt = prepare_or_fail($con, 'DELETE FROM sap_cl00 WHERE cl_ide = ?');
+    $stmt = prepare_or_fail($con, 'UPDATE sap_cl00 SET is_deleted = 1 WHERE cl_ide = ?');
 
     mysqli_stmt_bind_param($stmt, 'i', $id);
 
