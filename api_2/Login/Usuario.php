@@ -2,6 +2,7 @@
 require_once __DIR__ . '/Persona.php';
 
 class Usuario extends Persona{
+	private $id;
     private $usuario;
     private $contrasena;
 
@@ -9,6 +10,10 @@ class Usuario extends Persona{
         $this->usuario = $usuario;
         $this->contrasena = $contrasena;
     }
+    
+    public function getId() {
+		return $this->id;	
+	}
 
     public function getUsuario() {
         return $this->usuario;

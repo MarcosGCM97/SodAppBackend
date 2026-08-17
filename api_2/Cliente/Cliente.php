@@ -1,9 +1,10 @@
 <?php
 require_once __DIR__ . 'Contacto.php';
-require_once __DIR__ . 'Deuda.php';
+require_once './Deuda.php';
 
 class Cliente extends Persona {
 
+	private $id
     private $fechaDesde;
     private $fechaHasta;
     private $deuda;
@@ -14,6 +15,10 @@ class Cliente extends Persona {
         $this->fechaDesde = $fechaDesde;
         $this->fechaHasta = $fechaHasta;
     }
+    
+    public function getId() {
+		return $this->id;	
+	}
     
     public function getFechaDesde() {
         return $this->fechaDesde;

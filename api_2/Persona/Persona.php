@@ -2,6 +2,7 @@
 require_once 'Contacto.php';
 
 class Persona {
+	private $id;
     protected $nombre;
     protected $apellido;
     private $edad;
@@ -12,6 +13,10 @@ class Persona {
         $this->apellido = $apellido;
         $this->edad = $edad;
     }
+    
+    public function getId() {
+		return $this->id;	
+	}
 
     public function getNombre() {
         return $this->nombre;

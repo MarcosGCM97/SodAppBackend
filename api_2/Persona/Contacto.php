@@ -1,6 +1,7 @@
 <?php
 
 class Contacto {
+	private $id;
     private $calle;
     private $numero;
     private $telefono;
@@ -12,6 +13,10 @@ class Contacto {
         $this->telefono = $telefono;
         $this->mail = $mail;
     }
+    
+    public function getId() {
+		return $this->id;	
+	}
 
     public function getCalle() {
         return $this->calle;
