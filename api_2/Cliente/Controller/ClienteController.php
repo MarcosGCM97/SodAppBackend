@@ -1,6 +1,6 @@
 <?php
-require_once __DIR__ . '/lib.php';
-require_once __DIR__ . '/auth.php';
+require_once __DIR__ . '../../Core/lib.php';
+require_once __DIR__ . '../../Core/auth.php';
 
 allow_cors();
 
