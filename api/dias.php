@@ -66,31 +66,33 @@ if ($method === 'GET') {
 
         send_json(["success" => true, "days" => $clientes]);
     }
+}
 
-    if($method === 'PUT') {
+if ($method === 'PUT') {
         $data = get_json_input();
         
+        // Obtenemos el ID que ahora Android envía como 'cl_ide'
         $id = isset($data['cl_ide']) ? intval($data['cl_ide']) : 0;
 
         if($id <= 0) {
-            send_json(["success" => false, "error" => "Invalid or missing cl_ide"], 400);
+            send_json(["success" => false, "error" => "ID inválido o faltante"], 400);
         }
 
-        $fields = ['cl_lun', 'cl_mar', 'cl_mie', 'cl_jue', 'cl_vie', 'cl_sab'];
+        // 1. CORRECCIÓN SQL: Añadimos cl_dom y nos aseguramos de tener 8 marcadores '?'
+        $sql = "UPDATE sap_cl00 SET cl_lun = ?, cl_mar = ?, cl_mie = ?, cl_jue = ?, cl_vie = ?, cl_sab = ?, cl_dom = ? WHERE cl_ide = ?";
+        $stmt = prepare_or_fail($con, $sql);
 
-        $stmt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_lun = ?, cl_mar = ?, cl_mie = ?, cl_jue = ?, cl_vie = ?, cl_sab = ? WHERE cl_ide = ?');
-
-        // PHP (pre-7.x) compatible checks. Use isset to provide defaults (0) when fields are missing.
-        $lunes = isset($data['cl_lun']) ? (int)$data['cl_lun'] : 0;
-        $martes = isset($data['cl_mar']) ? (int)$data['cl_mar'] : 0;
+        // 2. Mapeo de datos (asegúrate que coincidan con los nombres de Android)
+        $lunes     = isset($data['cl_lun']) ? (int)$data['cl_lun'] : 0;
+        $martes    = isset($data['cl_mar']) ? (int)$data['cl_mar'] : 0;
         $miercoles = isset($data['cl_mie']) ? (int)$data['cl_mie'] : 0;
-        $jueves = isset($data['cl_jue']) ? (int)$data['cl_jue'] : 0;
-        $viernes = isset($data['cl_vie']) ? (int)$data['cl_vie'] : 0;
-        $sabado = isset($data['cl_sab']) ? (int)$data['cl_sab'] : 0;
-        $domingo = isset($data['cl_dom']) ? (int)$data['cl_dom'] : 0;
+        $jueves    = isset($data['cl_jue']) ? (int)$data['cl_jue'] : 0;
+        $viernes   = isset($data['cl_vie']) ? (int)$data['cl_vie'] : 0;
+        $sabado    = isset($data['cl_sab']) ? (int)$data['cl_sab'] : 0;
+        $domingo   = isset($data['cl_dom']) ? (int)$data['cl_dom'] : 0;
 
-        // Bind the computed variables (6 day flags + id)
-        mysqli_stmt_bind_param($stmt, 'iiiiiii', 
+        // 3. VINCULACIÓN: 8 'i' para 8 variables
+        mysqli_stmt_bind_param($stmt, 'iiiiiiii', 
             $lunes, 
             $martes, 
             $miercoles, 
@@ -102,9 +104,13 @@ if ($method === 'GET') {
         );
 
         if (mysqli_stmt_execute($stmt)) {
-            send_json(["success" => true, "message" => "Day updated"], 200);
+            // Opcional: Verificar si realmente se encontró el ID
+            if(mysqli_stmt_affected_rows($stmt) > 0) {
+                send_json(["success" => true, "message" => "Días actualizados correctamente"], 200);
+            } else {
+                send_json(["success" => true, "message" => "No hubo cambios o el ID no existe"], 200);
+            }
+        } else {
+            send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
         }
-
-        send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
-    }
 }
