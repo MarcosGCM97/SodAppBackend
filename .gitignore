@@ -1,0 +1,5 @@
+﻿# Local database dumps (may contain real customer data)
+tablasDB/
+
+# Local notes
+mail.txt
