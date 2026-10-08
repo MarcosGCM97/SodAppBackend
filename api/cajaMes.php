@@ -13,7 +13,7 @@ if ($method !== "GET") {
 }
 
 // Validate month (1..12) before formatting it
-$mesRaw = isset($_GET['mes']) ? trim($_GET['mes']) : '';
+$mesRaw = (isset($_GET['mes']) && is_string($_GET['mes'])) ? trim($_GET['mes']) : '';
 if (!ctype_digit($mesRaw) || intval($mesRaw) < 1 || intval($mesRaw) > 12) {
     send_json([
         "success" => false,
@@ -25,7 +25,7 @@ $mes = intval($mesRaw);
 // Optional year (4 digits), defaults to the current year
 $ano = intval(date('Y'));
 if (isset($_GET['ano']) && $_GET['ano'] !== '') {
-    $anoRaw = trim($_GET['ano']);
+    $anoRaw = is_string($_GET['ano']) ? trim($_GET['ano']) : '';
     if (!preg_match('/^\d{4}$/', $anoRaw)) {
         send_json([
             "success" => false,
