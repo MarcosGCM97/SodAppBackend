@@ -16,9 +16,9 @@ if ($method === 'GET') {
 
         $id = intval($_GET['id']);
 
-        $stmt = prepare_or_fail($con, 'SELECT cl_nom, cl_dir, cl_lun, cl_mar, cl_mie, cl_jue, cl_vie, cl_sab, cl_dom FROM sap_cl00 WHERE cl_ide = ?');
+        $stmt = prepare_or_fail($con, 'SELECT cl_nom, cl_dir, cl_lun, cl_mar, cl_mie, cl_jue, cl_vie, cl_sab, cl_dom FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ?');
 
-        mysqli_stmt_bind_param($stmt, 'i', $id);
+        mysqli_stmt_bind_param($stmt, 'ii', $id, $userId);
 
         mysqli_stmt_execute($stmt);
 
@@ -40,7 +40,8 @@ if ($method === 'GET') {
 
         send_json(["success" => false, "error" => "Day not found"], 404);
     } else {
-        $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_lun, cl_mar, cl_mie, cl_jue, cl_vie, cl_sab, cl_dom FROM sap_cl00');
+        // $userId is an int from the token; plain query keeps the string-typed JSON of this list
+        $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_lun, cl_mar, cl_mie, cl_jue, cl_vie, cl_sab, cl_dom FROM sap_cl00 WHERE cl_emp = ' . intval($userId));
 
         if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
@@ -82,7 +83,7 @@ if ($method === 'GET') {
 
         $fields = ['cl_lun', 'cl_mar', 'cl_mie', 'cl_jue', 'cl_vie', 'cl_sab'];
 
-        $stmt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_lun = ?, cl_mar = ?, cl_mie = ?, cl_jue = ?, cl_vie = ?, cl_sab = ? WHERE cl_ide = ?');
+        $stmt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_lun = ?, cl_mar = ?, cl_mie = ?, cl_jue = ?, cl_vie = ?, cl_sab = ? WHERE cl_ide = ? AND cl_emp = ?');
 
         // PHP (pre-7.x) compatible checks. Use isset to provide defaults (0) when fields are missing.
         $lunes = isset($data['cl_lun']) ? (int)$data['cl_lun'] : 0;
@@ -102,7 +103,8 @@ if ($method === 'GET') {
             $viernes, 
             $sabado, 
             $domingo,
-            $id
+            $id,
+            $userId
         );
 
         if (mysqli_stmt_execute($stmt)) {
