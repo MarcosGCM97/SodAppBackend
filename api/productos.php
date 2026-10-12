@@ -1,6 +1,5 @@
 <?php
 require_once __DIR__ . '/lib.php';
-require_once __DIR__ . '/auth.php';
 allow_cors();
 
 $method = $_SERVER['REQUEST_METHOD'];
@@ -37,8 +36,6 @@ if ($method === 'GET') {
 }
 
 if ($method === 'POST') {
-    // require auth for creating products
-    require_auth();
     $data = get_json_input();
 
     $nombre = isset($data['nombrePr']) ? $data['nombrePr'] : (isset($data['name']) ? $data['name'] : null);
@@ -70,20 +67,13 @@ if ($method === 'POST') {
 }
 
 if ($method === 'PUT') {
-    // require auth for updating products
-    require_auth();
-    $data = get_json_input();
+    $nombre = isset($_GET['nombre']) ? $_GET['nombre'] : null;
 
-    $nombre = isset($data['nombrePr']) ? $data['nombrePr'] : (isset($data['name']) ? $data['name'] : (isset($data['nombre']) ? $data['nombre'] : null));
+    $precio = isset($_GET['precio']) ? $_GET['precio'] : null;
 
-    $precio = isset($data['precioUni']) ? $data['precioUni'] : (isset($data['price']) ? $data['price'] : null);
-
-    $cantidad = isset($data['stock']) ? $data['stock'] : (isset($data['cantidad']) ? $data['cantidad'] : null);
+    $cantidad = isset($_GET['cantidad']) ? $_GET['cantidad'] : null;
 
     if (!$nombre || $precio === null || $cantidad === null) send_json(["success" => false, "error" => "Datos incompletos"], 400);
-
-    $precio = floatval($precio);
-    $cantidad = intval($cantidad);
 
     $stmt = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_val = ?, pr_stk = ? WHERE pr_nom = ? AND updated_at IS NULL');
 
@@ -101,8 +91,6 @@ if ($method === 'PUT') {
 }
 
 if ($method === 'DELETE') {
-    // require auth for deleting products
-    require_auth();
     $nombre = isset($_GET['nombre']) ? $_GET['nombre'] : '';
 
     if ($nombre === '') send_json(["success"=>false,"error"=>"Nombre requerido"],400);
