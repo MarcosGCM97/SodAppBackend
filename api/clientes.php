@@ -1,7 +1,11 @@
 <?php
 require_once __DIR__ . '/lib.php';
+require_once __DIR__ . '/auth.php';
 
 allow_cors();
+
+// Every method requires a valid token; the owner always comes from it
+$userId = current_user_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 

@@ -18,6 +18,17 @@ function require_auth() {
     return $payload;
 }
 
+// Owner id (sap_us00.us_ide) of the authenticated user, taken only from the
+// validated JWT. Sends 401 when the token is missing, invalid or has no us_ide.
+function current_user_id() {
+    $payload = require_auth();
+    $id = isset($payload['us_ide']) ? intval($payload['us_ide']) : 0;
+    if ($id <= 0) {
+        send_json(["success"=>false,"error"=>"Invalid or expired token"], 401);
+    }
+    return $id;
+}
+
 function current_user() {
     return isset($GLOBALS['current_user']) ? $GLOBALS['current_user'] : null;
 }

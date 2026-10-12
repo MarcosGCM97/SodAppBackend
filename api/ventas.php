@@ -7,6 +7,9 @@ require_once __DIR__ . '/lib.php';
 require_once __DIR__ . '/auth.php';
 allow_cors();
 
+// Every method requires a valid token; the owner always comes from it
+$userId = current_user_id();
+
 $method = $_SERVER['REQUEST_METHOD'];
 
 // GET: optionally ?usuarioId= to filter by user, ?id=&usuarioId= to filter by cliente and user
@@ -116,8 +119,6 @@ if ($method === 'GET') {
 
 // POST: crear ventas. JSON: {"clienteId":1,"productos":[{"nombre":"X","cantidad":2}, ...]}
 if ($method === 'POST') {
-    // require auth for creating sales
-    require_auth();
     $data = get_json_input();
 
     if (!isset($data['clienteId']) || !isset($data['productos']) || !is_array($data['productos']) || count($data['productos'])===0) {
@@ -246,8 +247,6 @@ if ($method === 'POST') {
     send_json(["success"=>true,"message"=>"Ventas registradas correctamente"],201);
 }
 if ($method==="DELETE") {
-    // require auth for deleting sales
-    require_auth();
     $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
 
     if ($id <= 0) {

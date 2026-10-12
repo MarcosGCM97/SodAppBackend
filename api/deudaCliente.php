@@ -4,6 +4,9 @@ require_once __DIR__ . '/auth.php';
 
 allow_cors();
 
+// Every method requires a valid token; the owner always comes from it
+$userId = current_user_id();
+
 $method = $_SERVER['REQUEST_METHOD'];
 
 //GET /api/deuda.php?id=1
@@ -32,8 +35,6 @@ if ($method === 'GET') {
 }
 
 if ($method === "PUT") {
-    // require auth for updating debt
-    require_auth();
     $data = get_json_input();
 
     $id = isset($data['id']) ? intval($data['id']) : 0;
