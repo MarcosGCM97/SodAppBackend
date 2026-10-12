@@ -13,19 +13,26 @@ UNION ALL SELECT 'sap_pr00', pr_emp, COUNT(*) FROM sap_pr00 GROUP BY pr_emp
 UNION ALL SELECT 'sap_vt00', vt_emp, COUNT(*) FROM sap_vt00 GROUP BY vt_emp;
 
 -- 2. Names -> ids (only values that match an existing user name)
-UPDATE sap_cl00 c JOIN sap_us00 u ON u.us_nom = c.cl_emp SET c.cl_emp = u.us_ide;
-UPDATE sap_pr00 p JOIN sap_us00 u ON u.us_nom = p.pr_emp SET p.pr_emp = u.us_ide;
-UPDATE sap_vt00 v JOIN sap_us00 u ON u.us_nom = v.vt_emp SET v.vt_emp = u.us_ide;
+-- Explicit COLLATE: in production sap_us00 uses utf8mb4_0900_ai_ci and the other tables utf8mb4_general_ci.
+UPDATE sap_cl00 c JOIN sap_us00 u ON u.us_nom COLLATE utf8mb4_general_ci = c.cl_emp SET c.cl_emp = u.us_ide;
+UPDATE sap_pr00 p JOIN sap_us00 u ON u.us_nom COLLATE utf8mb4_general_ci = p.pr_emp SET p.pr_emp = u.us_ide;
+UPDATE sap_vt00 v JOIN sap_us00 u ON u.us_nom COLLATE utf8mb4_general_ci = v.vt_emp SET v.vt_emp = u.us_ide;
 
 -- 3. Empty / NULL owners -> fallback owner
 UPDATE sap_cl00 SET cl_emp = @fallback_owner WHERE (cl_emp IS NULL OR TRIM(cl_emp) = '') AND @fallback_owner IS NOT NULL;
 UPDATE sap_pr00 SET pr_emp = @fallback_owner WHERE (pr_emp IS NULL OR TRIM(pr_emp) = '') AND @fallback_owner IS NOT NULL;
 UPDATE sap_vt00 SET vt_emp = @fallback_owner WHERE (vt_emp IS NULL OR TRIM(vt_emp) = '') AND @fallback_owner IS NOT NULL;
 
+-- 3b. Ventas whose owner is still not a valid user id (e.g. '0') take the owner of their cliente
+UPDATE sap_vt00 v JOIN sap_cl00 c ON c.cl_ide = v.vt_cli
+SET v.vt_emp = c.cl_emp
+WHERE v.vt_emp NOT IN (SELECT CAST(us_ide AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_general_ci FROM sap_us00)
+  AND c.cl_emp IN (SELECT CAST(us_ide AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_general_ci FROM sap_us00);
+
 -- 4. Report: rows whose owner is not a valid user id (must be empty before step 5)
-SELECT 'sap_cl00' AS tabla, cl_ide AS id, cl_emp AS owner FROM sap_cl00 WHERE cl_emp NOT IN (SELECT CAST(us_ide AS CHAR) FROM sap_us00) OR cl_emp IS NULL
-UNION ALL SELECT 'sap_pr00', pr_ide, pr_emp FROM sap_pr00 WHERE pr_emp NOT IN (SELECT CAST(us_ide AS CHAR) FROM sap_us00) OR pr_emp IS NULL
-UNION ALL SELECT 'sap_vt00', vt_ide, vt_emp FROM sap_vt00 WHERE vt_emp NOT IN (SELECT CAST(us_ide AS CHAR) FROM sap_us00) OR vt_emp IS NULL;
+SELECT 'sap_cl00' AS tabla, cl_ide AS id, cl_emp AS owner FROM sap_cl00 WHERE cl_emp NOT IN (SELECT CAST(us_ide AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_general_ci FROM sap_us00) OR cl_emp IS NULL
+UNION ALL SELECT 'sap_pr00', pr_ide, pr_emp FROM sap_pr00 WHERE pr_emp NOT IN (SELECT CAST(us_ide AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_general_ci FROM sap_us00) OR pr_emp IS NULL
+UNION ALL SELECT 'sap_vt00', vt_ide, vt_emp FROM sap_vt00 WHERE vt_emp NOT IN (SELECT CAST(us_ide AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_general_ci FROM sap_us00) OR vt_emp IS NULL;
 
 -- 5. Column types (no 'Ariza' default) and indexes
 ALTER TABLE sap_cl00 MODIFY cl_emp INT NOT NULL, ADD INDEX idx_cl_emp (cl_emp);
