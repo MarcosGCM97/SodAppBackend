@@ -8,10 +8,11 @@ class Database {
 
    public function __construct() {
        // Cargar configuración desde variable de entorno o archivo
-       $this->host = getenv('DB_HOST') ?: 'localhost';
-       $this->db = getenv('DB_NAME') ?: 'c2761775_sodapp';
-       $this->user = getenv('DB_USER') ?: 'c2761775_sodapp';
-       $this->pwd = getenv('DB_PASS') ?: 'TUfiresi31';
+       // A defined but empty variable is a valid value (e.g. local root without password)
+       $this->host = getenv('DB_HOST') !== false ? getenv('DB_HOST') : 'localhost';
+       $this->db = getenv('DB_NAME') !== false ? getenv('DB_NAME') : 'c2761775_sodapp';
+       $this->user = getenv('DB_USER') !== false ? getenv('DB_USER') : 'c2761775_sodapp';
+       $this->pwd = getenv('DB_PASS') !== false ? getenv('DB_PASS') : 'TUfiresi31';
    }
 
    public function connect() {

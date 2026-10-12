@@ -31,7 +31,7 @@ Out: production DB execution (user runs the script after backup), login hardenin
 ## Tasks
 
 - [x] **U1 – Owner column migration (A1, A11).** SQL script under `tablasDB/migrations/`, local seed users `Ariza` and `Congre`, convert names to ids, `INT NOT NULL`, indexes. Route: inline (one SQL file, schema already read).
-- [ ] **U2 – Isolation test script (A13), RED first.** PHP CLI script hitting the API through the PHP built-in server with two users. Route: delegated writer.
+- [x] **U2 – Isolation test script (A13), RED first.** PHP CLI script hitting the API through the PHP built-in server with two users. Route: delegated writer.
 - [ ] **U3 – Auth helper + auth on every endpoint (A2–A4).** `current_user_id()` in `auth.php`; `require_auth()` on all methods of all endpoints except `login.php`. Route: delegated writer (6+ files).
 - [ ] **U4 – Owner filtering (A5–A10, A12).** Reads, inserts, updates/deletes, sale/debt ownership checks, JOINs by `pr_emp = vt_emp`, `UNIQUE (pr_emp, pr_nom)` + 409. Route: delegated writer.
 - [ ] **U5 – App token handling (APP1–APP4).** Persist token, OkHttp interceptor, 401 → login, clear on logout. Route: delegated writer, repo `SodAppComposse`.
@@ -59,7 +59,8 @@ Planned slices: PR1 U1+U2 · PR2 U3 · PR3 U4 · PR4 U5 (app repo). Note: base `
 
 - 2026-10-12: feature document created; schema of `sap_us00/cl00/pr00/vt00` read. Local DB has only user `Test` (id 1); `'Ariza'` owns 35 clientes, 5 productos, 368 ventas; 1 cliente with empty owner; 1 venta with `'1'`.
 - 2026-10-12 U1 (inline): backup of the 4 tables in session scratchpad; `000_local_seed_users.sql` adds Ariza (id 2) and Congre (id 3), password `test1234`; `001_owner_columns_to_user_id.sql` run. Evidence: after counts cl 2→36, pr 2→5, vt 1→1 / 2→368; step 4 report empty; columns `int(11) NOT NULL` without default; indexes `idx_cl_emp`, `idx_pr_emp_nom`, `idx_vt_emp_fec` present. Note: step 5 is not re-runnable (ADD INDEX). Commit pending chain-strategy answer.
+- 2026-10-12 U2 (delegated writer): `tests/isolation_test.php` (built-in server on 127.0.0.1:8765, uses itself as router to putenv the DB/JWT vars because Windows drops empty `DB_PASS=` from a child env). `api/conexion.php` now treats a defined-but-empty env var as valid. RED observed: `php tests/isolation_test.php` → 25 passed, 80 failed, exit 1 (every no-token/invalid-token case returns 200/201/404 instead of 401; Congre sees 36 clientes, 5 productos, 15 ventas, caja, dias and 22 deudores of Ariza; new records get cl_emp=0 / vt_emp=2 / product insert blocked by global name check; cross-user GET/PUT/DELETE/deuda/venta succeed; duplicates return 400 not 409). DB checksums identical before/after the run. Note: local `sap_pr00` has no `deleted_at` column used by `productos.php`; the test adds it for the run and drops it at the end (production schema to be confirmed).
 
 ## Next step
 
-Commit U1, then U2 (RED isolation tests).
+U3 (auth on every endpoint), then U4 (owner filtering) until the isolation test is green.
