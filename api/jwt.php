@@ -52,12 +52,17 @@ function verify_jwt($token) {
 
 function get_bearer_token() {
     $headers = null;
-    if (isset($_SERVER['HTTP_AUTHORIZATION'])) {
+    if (!empty($_SERVER['HTTP_AUTHORIZATION'])) {
         $headers = trim($_SERVER['HTTP_AUTHORIZATION']);
+    } else if (!empty($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+        // Apache with PHP as CGI/FPM: the header arrives only through the .htaccess rewrite rule
+        $headers = trim($_SERVER['REDIRECT_HTTP_AUTHORIZATION']);
     } else if (function_exists('apache_request_headers')) {
-        $requestHeaders = apache_request_headers();
-        if (isset($requestHeaders['Authorization'])) {
-            $headers = trim($requestHeaders['Authorization']);
+        foreach (apache_request_headers() as $name => $value) {
+            if (strcasecmp($name, 'Authorization') === 0) {
+                $headers = trim($value);
+                break;
+            }
         }
     }
 
