@@ -1,6 +1,5 @@
 <?php
 require_once __DIR__ . '/lib.php';
-require_once __DIR__ . '/auth.php';
 
 allow_cors();
 
@@ -41,8 +40,6 @@ if ($method === 'GET') {
 
 // POST: crear cliente. JSON: {"nombreCl":"...","numTelCl":"...","direccionCl":"..."}
 if ($method === 'POST') {
-    // require auth for creating clients
-    require_auth();
     $data = get_json_input();
 
     $nombre = isset($data['nombreCl']) ? $data['nombreCl'] : (isset($data['name']) ? $data['name'] : null);
@@ -66,19 +63,17 @@ if ($method === 'POST') {
 
 // PUT: actualizar cliente (body JSON with id and fields)
 if ($method === 'PUT') {
-    // require auth for updating clients
-    require_auth();
     $data = get_json_input();
 
-    $id = isset($data['id']) ? intval($data['id']) : 0;
+    $id = isset($data['cl_ide']) ? intval($data['cl_ide']) : 0;
 
     if ($id <= 0) send_json(["success" => false, "error" => "ID inválido"], 400);
 
-    $nombre = isset($data['nombreCl']) ? $data['nombreCl'] : (isset($data['name']) ? $data['name'] : null);
+    $nombre = isset($data['cl_nom']) ? $data['cl_nom'] : (isset($data['name']) ? $data['name'] : null);
 
-    $tel = isset($data['numTelCl']) ? $data['numTelCl'] : (isset($data['tel']) ? $data['tel'] : null);
+    $tel = isset($data['cl_tel']) ? $data['cl_tel'] : (isset($data['tel']) ? $data['tel'] : null);
 
-    $dir = isset($data['direccionCl']) ? $data['direccionCl'] : (isset($data['address']) ? $data['address'] : null);
+    $dir = isset($data['cl_dir']) ? $data['cl_dir'] : (isset($data['address']) ? $data['address'] : null);
 
     if (!$nombre || !$tel || !$dir) send_json(["success" => false, "error" => "Datos incompletos"], 400);
 
@@ -95,8 +90,6 @@ if ($method === 'PUT') {
 
 // DELETE: /api/clients.php?id=1 (Soft Delete)
 if ($method === 'DELETE') {
-    // require auth for deleting clients
-    require_auth();
     $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
 
     if ($id <= 0) send_json(["success" => false, "error" => "ID inválido"], 400);
