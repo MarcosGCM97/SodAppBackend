@@ -535,6 +535,22 @@ check("Congre PUT own producto left Ariza's same-name producto unchanged", $row 
 expect_status('Congre PUT deuda of own cliente', 200, http('PUT', 'deudaCliente.php', [], [
     'id' => $congreClId, 'deuda' => 5,
 ], $tokC));
+// The Android app sends id and deuda as query params, not as a JSON body
+$debtBefore = (float) db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$congreClId])['cl_deb'];
+expect_status('Congre PUT deuda of own cliente via query params', 200, http('PUT', 'deudaCliente.php', [
+    'id' => $congreClId, 'deuda' => '3.0',
+], null, $tokC));
+$debtAfter = (float) db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$congreClId])['cl_deb'];
+check('Congre PUT deuda via query params subtracted the amount', $debtAfter === $debtBefore - 3, "before=$debtBefore after=$debtAfter");
+expect_status('Congre PUT deuda larger than the debt -> 409', 409, http('PUT', 'deudaCliente.php', [
+    'id' => $congreClId, 'deuda' => (string) ($debtAfter + 1000),
+], null, $tokC));
+$debtUnchanged = (float) db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$congreClId])['cl_deb'];
+check('Congre PUT deuda larger than the debt left it unchanged', $debtUnchanged === $debtAfter, "after=$debtUnchanged");
+expect_status('Congre PUT deuda of Ariza cliente via query params', 404, http('PUT', 'deudaCliente.php', [
+    'id' => $targetClId, 'deuda' => '1.0',
+], null, $tokC));
+assert_unchanged('Congre PUT deuda of Ariza cliente via query params', 'sap_cl00', 'cl_ide', $targetCl);
 expect_status('Congre DELETE own venta', 200, http('DELETE', 'ventas.php', ['id' => $congreVtId], null, $tokC));
 expect_status('Congre DELETE own producto', 200, http('DELETE', 'productos.php', ['nombre' => $dupName], null, $tokC));
 $row = db_row('SELECT pr_ide FROM sap_pr00 WHERE pr_ide = ? AND deleted_at IS NULL', 'i', [(int) $dupProduct['pr_ide']]);

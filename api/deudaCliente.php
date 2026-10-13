@@ -36,13 +36,14 @@ if ($method === 'GET') {
 }
 
 if ($method === "PUT") {
-    $data = get_json_input();
+    // The Android app sends ?id=..&deuda=.. as query params; other clients may send a JSON body
+    $data = isset($_GET['id']) ? $_GET : get_json_input();
 
-    $id = isset($data['id']) ? intval($data['id']) : 0;
+    $id = isset($data['id']) && !is_array($data['id']) ? intval($data['id']) : 0;
 
     if ($id <= 0) send_json(["success" => false, "error" => "ID inválido"], 400);
 
-    $totalDeuda = isset($data['deuda']) ? floatval($data['deuda']) : 0;
+    $totalDeuda = isset($data['deuda']) && !is_array($data['deuda']) ? floatval($data['deuda']) : 0;
 
     if ($totalDeuda <= 0) {
         send_json(["success" => false, "error" => "La deuda debe ser mayor a 0"], 400);
@@ -77,10 +78,11 @@ if ($method === "PUT") {
                 "message" => "Deuda actualizada correctamente"
             ]);
         }
+        // The cliente exists and is owned by the user, so no affected row means the amount exceeds the debt
         send_json([
             "success" => false,
-            "error" => mysqli_stmt_error($stmt)
-        ], 500);
+            "error" => "El monto supera la deuda actual del cliente"
+        ], 409);
     }
 
     send_json([
