@@ -3,3 +3,6 @@ tablasDB/
 
 # Local notes
 mail.txt
+
+# PHP error log
+api/error.log
