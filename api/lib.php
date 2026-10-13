@@ -5,6 +5,10 @@
 // load DB connection from project
 require_once __DIR__ . '/conexion.php';
 
+// Endpoints check mysqli return values / errno (e.g. 1062 -> 409); PHP 8.1+
+// throws exceptions by default instead, so keep the classic reporting mode.
+mysqli_report(MYSQLI_REPORT_OFF);
+
 $db = new Database();
 
 $con = $db->connect();

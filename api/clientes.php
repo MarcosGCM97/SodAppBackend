@@ -1,7 +1,11 @@
 <?php
 require_once __DIR__ . '/lib.php';
+require_once __DIR__ . '/auth.php';
 
 allow_cors();
+
+// Every method requires a valid token; the owner always comes from it
+$userId = current_user_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
@@ -12,9 +16,9 @@ if ($method === 'GET') {
 
         $id = intval($_GET['id']);
 
-        $stmt = prepare_or_fail($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp FROM sap_cl00 WHERE cl_ide = ? AND is_deleted = 0');
+        $stmt = prepare_or_fail($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ? AND is_deleted = 0');
 
-        mysqli_stmt_bind_param($stmt, 'i', $id);
+        mysqli_stmt_bind_param($stmt, 'ii', $id, $userId);
 
         mysqli_stmt_execute($stmt);
 
@@ -26,7 +30,8 @@ if ($method === 'GET') {
 
         send_json(["success" => false, "error" => "Cliente no encontrado"], 404);
     } else {
-        $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp FROM sap_cl00 WHERE is_deleted = 0 ORDER BY cl_nom');
+        // $userId is an int from the token; plain query keeps the string-typed JSON of this list
+        $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp FROM sap_cl00 WHERE cl_emp = ' . intval($userId) . ' AND is_deleted = 0 ORDER BY cl_nom');
 
         if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
@@ -50,9 +55,9 @@ if ($method === 'POST') {
 
     if (!$nombre || !$tel || !$dir) send_json(["success" => false, "error" => "Datos incompletos: nombre, telefono y direccion"], 400);
 
-    $stmt = prepare_or_fail($con, 'INSERT INTO sap_cl00 SET cl_nom = ?, cl_tel = ?, cl_dir = ?, cl_emp = "Ariza"');
+    $stmt = prepare_or_fail($con, 'INSERT INTO sap_cl00 SET cl_nom = ?, cl_tel = ?, cl_dir = ?, cl_emp = ?');
 
-    mysqli_stmt_bind_param($stmt, 'sss', $nombre, $tel, $dir);
+    mysqli_stmt_bind_param($stmt, 'sssi', $nombre, $tel, $dir, $userId);
 
     if (mysqli_stmt_execute($stmt)) {
         send_json(["success" => true, "message" => "Cliente creado", "id" => mysqli_insert_id($con)], 201);
@@ -77,9 +82,20 @@ if ($method === 'PUT') {
 
     if (!$nombre || !$tel || !$dir) send_json(["success" => false, "error" => "Datos incompletos"], 400);
 
-    $stmt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_nom = ?, cl_tel = ?, cl_dir = ? WHERE cl_ide = ?');
+    // Ownership check first: an UPDATE with unchanged values affects 0 rows
+    $check = prepare_or_fail($con, 'SELECT 1 FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ?');
 
-    mysqli_stmt_bind_param($stmt, 'sssi', $nombre, $tel, $dir, $id);
+    mysqli_stmt_bind_param($check, 'ii', $id, $userId);
+
+    mysqli_stmt_execute($check);
+
+    $resCheck = mysqli_stmt_get_result($check);
+
+    if (!$resCheck || mysqli_num_rows($resCheck) === 0) send_json(["success" => false, "error" => "No se encontró el cliente"], 404);
+
+    $stmt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_nom = ?, cl_tel = ?, cl_dir = ? WHERE cl_ide = ? AND cl_emp = ?');
+
+    mysqli_stmt_bind_param($stmt, 'sssii', $nombre, $tel, $dir, $id, $userId);
 
     if (mysqli_stmt_execute($stmt)) {
         send_json(["success" => true, "message" => "Cliente actualizado"]);
@@ -94,9 +110,9 @@ if ($method === 'DELETE') {
 
     if ($id <= 0) send_json(["success" => false, "error" => "ID inválido"], 400);
 
-    $stmt = prepare_or_fail($con, 'UPDATE sap_cl00 SET is_deleted = 1 WHERE cl_ide = ?');
+    $stmt = prepare_or_fail($con, 'UPDATE sap_cl00 SET is_deleted = 1 WHERE cl_ide = ? AND cl_emp = ?');
 
-    mysqli_stmt_bind_param($stmt, 'i', $id);
+    mysqli_stmt_bind_param($stmt, 'ii', $id, $userId);
 
     if (mysqli_stmt_execute($stmt)) {
         if ($stmt->affected_rows > 0) send_json(["success" => true, "message" => "Cliente eliminado"]);

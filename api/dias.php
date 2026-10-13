@@ -1,7 +1,11 @@
 <?php
 require_once __DIR__ . '/lib.php';
+require_once __DIR__ . '/auth.php';
 
 allow_cors();
+
+// Every method requires a valid token; the owner always comes from it
+$userId = current_user_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
@@ -12,9 +16,9 @@ if ($method === 'GET') {
 
         $id = intval($_GET['id']);
 
-        $stmt = prepare_or_fail($con, 'SELECT cl_nom, cl_dir, cl_lun, cl_mar, cl_mie, cl_jue, cl_vie, cl_sab, cl_dom FROM sap_cl00 WHERE cl_ide = ?');
+        $stmt = prepare_or_fail($con, 'SELECT cl_nom, cl_dir, cl_lun, cl_mar, cl_mie, cl_jue, cl_vie, cl_sab, cl_dom FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ?');
 
-        mysqli_stmt_bind_param($stmt, 'i', $id);
+        mysqli_stmt_bind_param($stmt, 'ii', $id, $userId);
 
         mysqli_stmt_execute($stmt);
 
@@ -36,7 +40,8 @@ if ($method === 'GET') {
 
         send_json(["success" => false, "error" => "Day not found"], 404);
     } else {
-        $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_lun, cl_mar, cl_mie, cl_jue, cl_vie, cl_sab, cl_dom FROM sap_cl00');
+        // $userId is an int from the token; plain query keeps the string-typed JSON of this list
+        $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_lun, cl_mar, cl_mie, cl_jue, cl_vie, cl_sab, cl_dom FROM sap_cl00 WHERE cl_emp = ' . intval($userId));
 
         if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
@@ -69,48 +74,50 @@ if ($method === 'GET') {
 }
 
 if ($method === 'PUT') {
-        $data = get_json_input();
-        
-        // Obtenemos el ID que ahora Android envía como 'cl_ide'
-        $id = isset($data['cl_ide']) ? intval($data['cl_ide']) : 0;
+    $data = get_json_input();
 
-        if($id <= 0) {
-            send_json(["success" => false, "error" => "ID inválido o faltante"], 400);
-        }
+    // Android sends the cliente id as 'cl_ide'
+    $id = isset($data['cl_ide']) ? intval($data['cl_ide']) : 0;
 
-        // 1. CORRECCIÓN SQL: Añadimos cl_dom y nos aseguramos de tener 8 marcadores '?'
-        $sql = "UPDATE sap_cl00 SET cl_lun = ?, cl_mar = ?, cl_mie = ?, cl_jue = ?, cl_vie = ?, cl_sab = ?, cl_dom = ? WHERE cl_ide = ?";
-        $stmt = prepare_or_fail($con, $sql);
+    if ($id <= 0) {
+        send_json(["success" => false, "error" => "ID inválido o faltante"], 400);
+    }
 
-        // 2. Mapeo de datos (asegúrate que coincidan con los nombres de Android)
-        $lunes     = isset($data['cl_lun']) ? (int)$data['cl_lun'] : 0;
-        $martes    = isset($data['cl_mar']) ? (int)$data['cl_mar'] : 0;
-        $miercoles = isset($data['cl_mie']) ? (int)$data['cl_mie'] : 0;
-        $jueves    = isset($data['cl_jue']) ? (int)$data['cl_jue'] : 0;
-        $viernes   = isset($data['cl_vie']) ? (int)$data['cl_vie'] : 0;
-        $sabado    = isset($data['cl_sab']) ? (int)$data['cl_sab'] : 0;
-        $domingo   = isset($data['cl_dom']) ? (int)$data['cl_dom'] : 0;
+    // The cliente must belong to the token user
+    $check = prepare_or_fail($con, 'SELECT 1 FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ?');
+    mysqli_stmt_bind_param($check, 'ii', $id, $userId);
+    mysqli_stmt_execute($check);
+    $resCheck = mysqli_stmt_get_result($check);
+    if (!$resCheck || mysqli_num_rows($resCheck) === 0) {
+        send_json(["success" => false, "error" => "Cliente no encontrado"], 404);
+    }
 
-        // 3. VINCULACIÓN: 8 'i' para 8 variables
-        mysqli_stmt_bind_param($stmt, 'iiiiiiii', 
-            $lunes, 
-            $martes, 
-            $miercoles, 
-            $jueves, 
-            $viernes, 
-            $sabado, 
-            $domingo,
-            $id
-        );
+    $stmt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_lun = ?, cl_mar = ?, cl_mie = ?, cl_jue = ?, cl_vie = ?, cl_sab = ?, cl_dom = ? WHERE cl_ide = ? AND cl_emp = ?');
 
-        if (mysqli_stmt_execute($stmt)) {
-            // Opcional: Verificar si realmente se encontró el ID
-            if(mysqli_stmt_affected_rows($stmt) > 0) {
-                send_json(["success" => true, "message" => "Días actualizados correctamente"], 200);
-            } else {
-                send_json(["success" => true, "message" => "No hubo cambios o el ID no existe"], 200);
-            }
-        } else {
-            send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
-        }
+    $lunes     = isset($data['cl_lun']) ? (int)$data['cl_lun'] : 0;
+    $martes    = isset($data['cl_mar']) ? (int)$data['cl_mar'] : 0;
+    $miercoles = isset($data['cl_mie']) ? (int)$data['cl_mie'] : 0;
+    $jueves    = isset($data['cl_jue']) ? (int)$data['cl_jue'] : 0;
+    $viernes   = isset($data['cl_vie']) ? (int)$data['cl_vie'] : 0;
+    $sabado    = isset($data['cl_sab']) ? (int)$data['cl_sab'] : 0;
+    $domingo   = isset($data['cl_dom']) ? (int)$data['cl_dom'] : 0;
+
+    mysqli_stmt_bind_param($stmt, 'iiiiiiiii',
+        $lunes,
+        $martes,
+        $miercoles,
+        $jueves,
+        $viernes,
+        $sabado,
+        $domingo,
+        $id,
+        $userId
+    );
+
+    if (mysqli_stmt_execute($stmt)) {
+        // Ownership was checked above, so 0 affected rows only means the days did not change
+        send_json(["success" => true, "message" => "Días actualizados correctamente"], 200);
+    }
+
+    send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
 }

@@ -1,7 +1,11 @@
 <?php
 require_once 'lib.php';
+require_once __DIR__ . '/auth.php';
 
 allow_cors();
+
+// Every method requires a valid token; the owner always comes from it
+$userId = current_user_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
@@ -57,13 +61,13 @@ $query = 'SELECT cl.cl_nom, cl.cl_dir, cl.cl_tel,
         vt.vt_ide
     FROM sap_vt00 AS vt
     LEFT JOIN sap_cl00 AS cl ON cl.cl_ide = vt.vt_cli
-    LEFT JOIN sap_pr00 AS pr ON pr.pr_nom = vt.vt_pro
-    WHERE vt.vt_fec >= ? AND vt.vt_fec < ?
+    LEFT JOIN sap_pr00 AS pr ON pr.pr_nom = vt.vt_pro AND pr.pr_emp = vt.vt_emp
+    WHERE vt.vt_emp = ? AND vt.vt_fec >= ? AND vt.vt_fec < ?
     ORDER BY vt.vt_fec';
 
 $stmt = prepare_or_fail($con, $query);
 
-mysqli_stmt_bind_param($stmt, 'ss', $desde, $hasta);
+mysqli_stmt_bind_param($stmt, 'iss', $userId, $desde, $hasta);
 
 if (!mysqli_stmt_execute($stmt)) {
     send_json([
