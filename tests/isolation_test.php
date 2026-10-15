@@ -272,8 +272,22 @@ $dupName = $dupProduct['pr_nom'];
 $targetMonth = (int) date('n', strtotime($targetVt['vt_fec']));
 $targetYear = (int) date('Y', strtotime($targetVt['vt_fec']));
 
+// Delivery day ids of a cliente in the sap_cd00 join table, ascending.
+function cd_days($clienteId) {
+    return ids(db_rows('SELECT cd_dia FROM sap_cd00 WHERE cd_cli = ? ORDER BY cd_dia', 'i', [$clienteId]), 'cd_dia');
+}
+
+// Replaces the sap_cd00 rows of a cliente with exactly these day ids.
+function set_cd_days($clienteId, $dayIds) {
+    db_exec('DELETE FROM sap_cd00 WHERE cd_cli = ?', 'i', [$clienteId]);
+    foreach ($dayIds as $d) db_exec('INSERT INTO sap_cd00 (cd_cli, cd_dia) VALUES (?, ?)', 'ii', [$clienteId, $d]);
+}
+
+$targetCdDays = cd_days($targetClId);
+
 function restore_targets() {
-    global $targetCl, $targetPr, $targetVt, $dupProduct;
+    global $targetCl, $targetPr, $targetVt, $dupProduct, $targetClId, $targetCdDays;
+    if (cd_days($targetClId) !== $targetCdDays) set_cd_days($targetClId, $targetCdDays);
     restore_row('sap_cl00', 'cl_ide', $targetCl);
     restore_row('sap_pr00', 'pr_ide', $targetPr);
     restore_row('sap_pr00', 'pr_ide', $dupProduct);
@@ -284,6 +298,7 @@ function cleanup() {
     global $maxCl, $maxPr, $maxVt, $addedDeletedAt;
     db_exec('DELETE FROM sap_vt00 WHERE vt_ide > ?', 'i', [$maxVt]);
     db_exec('DELETE FROM sap_pr00 WHERE pr_ide > ?', 'i', [$maxPr]);
+    db_exec('DELETE FROM sap_cd00 WHERE cd_cli > ?', 'i', [$maxCl]);
     db_exec('DELETE FROM sap_cl00 WHERE cl_ide > ?', 'i', [$maxCl]);
     restore_targets();
     if ($addedDeletedAt && column_exists('sap_pr00', 'deleted_at')) {
@@ -559,6 +574,7 @@ expect_status('Congre PUT dias of own cliente', 200, http('PUT', 'dias.php', [],
 $row = db_row('SELECT cl_lun, cl_mie, cl_dom, cl_mar FROM sap_cl00 WHERE cl_ide = ?', 'i', [$congreClId]);
 check('Congre PUT dias saved all seven days', $row && (int) $row['cl_lun'] === 1 && (int) $row['cl_mie'] === 1
     && (int) $row['cl_dom'] === 1 && (int) $row['cl_mar'] === 0, json_encode($row));
+check('Congre PUT dias wrote the days set to 1 into sap_cd00', cd_days($congreClId) === [1, 3, 7], json_encode(cd_days($congreClId)));
 expect_status('Congre PUT dias of own cliente with unchanged values', 200, http('PUT', 'dias.php', [], [
     'cl_ide' => $congreClId, 'cl_lun' => 1, 'cl_mar' => 0, 'cl_mie' => 1, 'cl_jue' => 0,
     'cl_vie' => 0, 'cl_sab' => 0, 'cl_dom' => 1,
@@ -566,7 +582,49 @@ expect_status('Congre PUT dias of own cliente with unchanged values', 200, http(
 expect_status('Congre PUT dias of Ariza cliente', 404, http('PUT', 'dias.php', [], [
     'cl_ide' => $targetClId, 'cl_lun' => 1, 'cl_dom' => 1,
 ], $tokC));
+check('Congre PUT dias of Ariza cliente: sap_cd00 rows unchanged', cd_days($targetClId) === $targetCdDays, json_encode(cd_days($targetClId)));
 assert_unchanged('Congre PUT dias of Ariza cliente', 'sap_cl00', 'cl_ide', $targetCl);
+
+// Delivery days live in sap_cd00: a day sent as 0 is physically deleted
+expect_status('Congre PUT dias unsetting Miércoles', 200, http('PUT', 'dias.php', [], [
+    'cl_ide' => $congreClId, 'cl_lun' => 1, 'cl_dom' => 1,
+], $tokC));
+check('Congre PUT dias deleted the day set to 0 from sap_cd00', cd_days($congreClId) === [1, 7], json_encode(cd_days($congreClId)));
+
+// Reads come from sap_cd00 joined to sap_di00, ordered Lunes..Domingo
+set_cd_days($congreClId, [6, 2, 5]);
+$expectedDays = ['Martes', 'Viernes', 'Sábado'];
+$r = http('GET', 'dias.php', ['id' => $congreClId], null, $tokC);
+expect_status('Congre GET dias of own cliente by id', 200, $r);
+check('Congre GET dias by id reflects sap_cd00 rows with the same JSON',
+    $r[2] === json_encode(['success' => true, 'diasEntrega' => $expectedDays]), short($r[2]));
+list(, $j) = http('GET', 'dias.php', [], null, $tokC);
+$entry = null;
+foreach (list_of($j, 'days') as $d) if (isset($d['nombre']) && $d['nombre'] === $congreClName) $entry = $d;
+check('Congre GET dias list reflects sap_cd00 rows with the same JSON', $entry !== null
+    && array_keys($entry) === ['nombre', 'direccion', 'diasEntrega'] && $entry['diasEntrega'] === $expectedDays, json_encode($entry));
+
+// Ownership: Ariza can neither read nor write Congre's delivery days
+expect_status("Ariza GET Congre dias by id", 404, http('GET', 'dias.php', ['id' => $congreClId], null, $tokA));
+expect_status("Ariza PUT Congre dias", 404, http('PUT', 'dias.php', [], [
+    'cl_ide' => $congreClId, 'cl_lun' => 1, 'cl_mar' => 0, 'cl_vie' => 0, 'cl_sab' => 0,
+], $tokA));
+check('Ariza PUT Congre dias: sap_cd00 rows unchanged', cd_days($congreClId) === [2, 5, 6], json_encode(cd_days($congreClId)));
+
+// Soft-deleted clientes are hidden from the calendar and not writable
+db_exec('UPDATE sap_cl00 SET is_deleted = 1 WHERE cl_ide = ?', 'i', [$congreClId]);
+$missing = http('GET', 'dias.php', ['id' => 999999], null, $tokC);
+$r = http('GET', 'dias.php', ['id' => $congreClId], null, $tokC);
+check('Congre GET dias of soft-deleted cliente -> same 404 as missing', $r[0] === 404 && $r[2] === $missing[2],
+    "got {$r[0]}: " . short($r[2]));
+list(, $j) = http('GET', 'dias.php', [], null, $tokC);
+check('Congre GET dias list excludes soft-deleted cliente', isset($j['days'])
+    && !in_array($congreClName, array_column(list_of($j, 'days'), 'nombre'), true));
+expect_status('Congre PUT dias of soft-deleted cliente', 404, http('PUT', 'dias.php', [], [
+    'cl_ide' => $congreClId, 'cl_lun' => 1,
+], $tokC));
+check('Congre PUT dias of soft-deleted cliente: sap_cd00 rows unchanged', cd_days($congreClId) === [2, 5, 6], json_encode(cd_days($congreClId)));
+db_exec('UPDATE sap_cl00 SET is_deleted = 0 WHERE cl_ide = ?', 'i', [$congreClId]);
 expect_status('Congre DELETE own venta', 200, http('DELETE', 'ventas.php', ['id' => $congreVtId], null, $tokC));
 expect_status('Congre DELETE own producto', 200, http('DELETE', 'productos.php', ['nombre' => $dupName], null, $tokC));
 $row = db_row('SELECT pr_ide FROM sap_pr00 WHERE pr_ide = ? AND deleted_at IS NULL', 'i', [(int) $dupProduct['pr_ide']]);
