@@ -169,9 +169,9 @@ if ($method === 'POST') {
 
     $stmtInsert = prepare_or_fail($con, $insertQuery);
 
-    // Atomic conditional decrement: no read-then-write, so concurrent sales cannot oversell.
-    // Rows with NULL pr_stk fail the >= check and are rejected as insufficient stock.
-    $stmtDecrementStock = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_stk = pr_stk - ? WHERE pr_nom = ? AND pr_emp = ? AND deleted_at IS NULL AND pr_stk >= ?');
+    // Atomic decrement that never blocks a sale: the delivery already happened physically,
+    // so stock may go negative and signals that inventory needs adjusting. NULL counts as 0.
+    $stmtDecrementStock = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_stk = COALESCE(pr_stk, 0) - ? WHERE pr_nom = ? AND pr_emp = ? AND deleted_at IS NULL');
 
     foreach ($data['productos'] as $p) {
         $nombre = isset($p['nombre']) ? $p['nombre'] : null;
@@ -197,18 +197,12 @@ if ($method === 'POST') {
         }
 
         // descontar stock del producto
-        mysqli_stmt_bind_param($stmtDecrementStock, 'isii', $cantidad, $nombre, $userId, $cantidad);
+        mysqli_stmt_bind_param($stmtDecrementStock, 'isi', $cantidad, $nombre, $userId);
 
         if (!mysqli_stmt_execute($stmtDecrementStock)) {
             mysqli_rollback($con);
 
             send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtDecrementStock)],500);
-        }
-
-        if (mysqli_stmt_affected_rows($stmtDecrementStock) === 0) {
-            mysqli_rollback($con);
-
-            send_json(["success"=>false,"error"=>"Stock insuficiente: $nombre"],409);
         }
 
         // obtener precio
