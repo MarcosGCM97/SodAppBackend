@@ -1,5 +1,18 @@
 <?php
-// Minimal JWT helper (HS256). Uses getenv('JWT_SECRET') or fallback.
+// Minimal JWT helper (HS256). Secret comes from config (see config.php).
+require_once __DIR__ . '/config.php';
+
+function jwt_secret() {
+    $secret = config_value('JWT_SECRET');
+    // An empty or short secret makes tokens forgeable
+    if (strlen($secret) < 32) {
+        error_log('JWT_SECRET is missing or shorter than 32 characters');
+        http_response_code(500);
+        die(json_encode(['error' => 'Server configuration error'], JSON_UNESCAPED_UNICODE));
+    }
+    return $secret;
+}
+
 function base64url_encode($data) {
     return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
 }
@@ -11,7 +24,7 @@ function base64url_decode($data) {
 }
 
 function generate_jwt($payload, $expirySeconds = 86400) {
-    $secret = getenv('JWT_SECRET') ?: 'CHANGE_ME_PLEASE_OVERRIDE';
+    $secret = jwt_secret();
     $header = ['alg' => 'HS256', 'typ' => 'JWT'];
 
     $now = time();
@@ -28,7 +41,7 @@ function generate_jwt($payload, $expirySeconds = 86400) {
 }
 
 function verify_jwt($token) {
-    $secret = getenv('JWT_SECRET') ?: 'CHANGE_ME_PLEASE_OVERRIDE';
+    $secret = jwt_secret();
 
     $parts = explode('.', $token);
     if (count($parts) !== 3) return false;

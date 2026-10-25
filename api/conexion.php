@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/config.php';
 
 class Database {
    private $host;
@@ -7,12 +8,10 @@ class Database {
    private $pwd;
 
    public function __construct() {
-       // Cargar configuración desde variable de entorno o archivo
-       // A defined but empty variable is a valid value (e.g. local root without password)
-       $this->host = getenv('DB_HOST') !== false ? getenv('DB_HOST') : 'localhost';
-       $this->db = getenv('DB_NAME') !== false ? getenv('DB_NAME') : 'c2761775_sodapp';
-       $this->user = getenv('DB_USER') !== false ? getenv('DB_USER') : 'c2761775_sodapp';
-       $this->pwd = getenv('DB_PASS') !== false ? getenv('DB_PASS') : 'TUfiresi31';
+       $this->host = config_value('DB_HOST');
+       $this->db = config_value('DB_NAME');
+       $this->user = config_value('DB_USER');
+       $this->pwd = config_value('DB_PASS');
    }
 
    public function connect() {
@@ -20,9 +19,9 @@ class Database {
 
       // VALIDAR PRIMERO si la conexión fue exitosa
       if (!$con || mysqli_connect_errno()) {
-         $error = "Error al conectarse con MySQL: " . mysqli_connect_error();
-         error_log($error);
-         die(json_encode(['error' => $error], JSON_UNESCAPED_UNICODE));
+         error_log("Error al conectarse con MySQL: " . mysqli_connect_error());
+         http_response_code(500);
+         die(json_encode(['error' => 'Error al conectarse con la base de datos'], JSON_UNESCAPED_UNICODE));
       }
 
       // Ahora sí puedes usar $con
