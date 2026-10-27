@@ -6,3 +6,6 @@ mail.txt
 
 # PHP error log
 api/error.log
+
+# Real secrets (template: api/sodapp-config.example.php)
+sodapp-config.php
