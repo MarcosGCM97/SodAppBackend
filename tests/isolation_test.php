@@ -21,7 +21,7 @@ if (PHP_SAPI === 'cli-server') {
     putenv('DB_NAME=sodapp_test');
     putenv('DB_USER=root');
     putenv('DB_PASS=');
-    putenv('JWT_SECRET=local-test-secret');
+    putenv('JWT_SECRET=local-test-secret-0123456789abcdef');
     return false; // let the server handle the requested file from api/
 }
 
@@ -33,7 +33,7 @@ const DB_HOST = 'localhost';
 const DB_NAME = 'sodapp_test';
 const DB_USER = 'root';
 const DB_PASS = '';
-const JWT_SECRET = 'local-test-secret';
+const JWT_SECRET = 'local-test-secret-0123456789abcdef';
 const PASSWORD = 'test1234';
 const MARKER = 'zz_iso_test_';
 
