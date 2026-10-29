@@ -51,6 +51,15 @@ if ($method === 'POST') {
     
     if (!$nombre || $precio === null || $cantidad === null) send_json(["success" => false, "error" => "Datos incompletos"], 400);
 
+    // Returnable containers (optional, old app versions omit them): retornable defaults to false, vacios to 0
+    $retornable = isset($data['retornable']) ? parse_flag($data['retornable']) : 0;
+
+    if ($retornable === null) send_json(["success" => false, "error" => "Dato inválido: retornable debe ser verdadero o falso"], 400);
+
+    $vacios = isset($data['vacios']) ? parse_non_negative_int($data['vacios']) : 0;
+
+    if ($vacios === null) send_json(["success" => false, "error" => "Dato inválido: vacios debe ser un número entero mayor o igual a 0"], 400);
+
     // check exists (names are unique per owner: uq_pr_emp_nom)
     $check = prepare_or_fail($con, 'SELECT 1 FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ?');
 
@@ -62,9 +71,9 @@ if ($method === 'POST') {
 
     if ($resCheck && mysqli_num_rows($resCheck) > 0) send_json(["success"=>false,"error"=>"Ya existe producto"],409);
 
-    $stmt = prepare_or_fail($con, 'INSERT INTO sap_pr00 SET pr_nom = ?, pr_val = ?, pr_stk = ?, pr_emp = ?, created_at = CURDATE()');
+    $stmt = prepare_or_fail($con, 'INSERT INTO sap_pr00 SET pr_nom = ?, pr_val = ?, pr_stk = ?, pr_emp = ?, pr_ret = ?, pr_vac = ?, created_at = CURDATE()');
 
-    mysqli_stmt_bind_param($stmt, 'sdii', $nombre, $precio, $cantidad, $userId);
+    mysqli_stmt_bind_param($stmt, 'sdiiii', $nombre, $precio, $cantidad, $userId, $retornable, $vacios);
 
     if (mysqli_stmt_execute($stmt)) send_json(["success"=>true,"message"=>"Producto creado","id"=>mysqli_insert_id($con)],201);
 
@@ -83,6 +92,15 @@ if ($method === 'PUT') {
 
     if (!$nombre || $precio === null || $cantidad === null) send_json(["success" => false, "error" => "Datos incompletos"], 400);
 
+    // Optional retornable (0/1) and vacios (absolute); when omitted those columns are not touched
+    $retornable = isset($_GET['retornable']) ? parse_flag($_GET['retornable']) : false;
+
+    if ($retornable === null) send_json(["success" => false, "error" => "Dato inválido: retornable debe ser 0 o 1"], 400);
+
+    $vacios = isset($_GET['vacios']) ? parse_non_negative_int($_GET['vacios']) : false;
+
+    if ($vacios === null) send_json(["success" => false, "error" => "Dato inválido: vacios debe ser un número entero mayor o igual a 0"], 400);
+
     // Ownership check first: an UPDATE with unchanged values affects 0 rows
     $check = prepare_or_fail($con, 'SELECT 1 FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ? AND updated_at IS NULL');
 
@@ -94,9 +112,33 @@ if ($method === 'PUT') {
 
     if (!$resCheck || mysqli_num_rows($resCheck) === 0) send_json(["success"=>false,"error"=>"Producto no encontrado"],404);
 
-    $stmt = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_val = ?, pr_stk = ? WHERE pr_nom = ? AND pr_emp = ? AND updated_at IS NULL');
+    $sets = 'pr_val = ?, pr_stk = ?';
 
-    mysqli_stmt_bind_param($stmt, 'disi', $precio, $cantidad, $nombre, $userId);
+    $types = 'di';
+
+    $params = [$precio, $cantidad];
+
+    if ($retornable !== false) {
+        $sets .= ', pr_ret = ?';
+        $types .= 'i';
+        $params[] = $retornable;
+    }
+
+    if ($vacios !== false) {
+        $sets .= ', pr_vac = ?';
+        $types .= 'i';
+        $params[] = $vacios;
+    }
+
+    $stmt = prepare_or_fail($con, "UPDATE sap_pr00 SET $sets WHERE pr_nom = ? AND pr_emp = ? AND updated_at IS NULL");
+
+    $types .= 'si';
+
+    $params[] = $nombre;
+
+    $params[] = $userId;
+
+    mysqli_stmt_bind_param($stmt, $types, ...$params);
 
     if (mysqli_stmt_execute($stmt)) {
         send_json(["success"=>true,"message"=>"Producto actualizado"]);

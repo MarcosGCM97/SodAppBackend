@@ -68,4 +68,22 @@ function prepare_or_fail($con, $query) {
     return $stmt;
 }
 
+// Integer >= 0 from JSON or a query param (int or digit string); null when invalid (negative, decimal, text)
+function parse_non_negative_int($value) {
+    if (is_int($value)) return $value >= 0 ? $value : null;
+
+    if (is_string($value) && ctype_digit($value)) return intval($value);
+
+    return null;
+}
+
+// Boolean flag as 0/1 from JSON (true/false, 0/1) or a query param ("0"/"1"); null when invalid
+function parse_flag($value) {
+    if (is_bool($value)) return $value ? 1 : 0;
+
+    if ($value === 0 || $value === 1 || $value === '0' || $value === '1') return intval($value);
+
+    return null;
+}
+
 ?>

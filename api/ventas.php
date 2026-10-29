@@ -143,8 +143,10 @@ if ($method === 'POST') {
         send_json(["success"=>false,"error"=>"Cliente no encontrado o eliminado"],404);
     }
 
-    // Validar que cada producto pertenece al usuario
-    $stmtValidateProduct = prepare_or_fail($con, 'SELECT 1 FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ?');
+    // Validar que cada producto pertenece al usuario; keep its id and whether it is returnable
+    $stmtValidateProduct = prepare_or_fail($con, 'SELECT pr_ide, pr_ret FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ?');
+
+    $productos = [];
 
     foreach ($data['productos'] as $p) {
         $nombre = isset($p['nombre']) ? $p['nombre'] : null;
@@ -157,21 +159,31 @@ if ($method === 'POST') {
 
         $resProduct = mysqli_stmt_get_result($stmtValidateProduct);
 
-        if (!$resProduct || mysqli_num_rows($resProduct) === 0) {
+        $rowProduct = $resProduct ? mysqli_fetch_assoc($resProduct) : null;
+
+        if (!$rowProduct) {
             send_json(["success"=>false,"error"=>"Producto no encontrado: $nombre"],404);
         }
+        $productos[$nombre] = $rowProduct;
     }
 
     // begin transaction (best effort)
     mysqli_autocommit($con, false);
 
-    $insertQuery = 'INSERT INTO sap_vt00 SET vt_cli = ?, vt_pro = ?, vt_can = ?, vt_emp = ?, vt_fec = ?, vt_mon = ?';
+    // vt_dev: containers returned in the line; NULL for non-returnable products (no container effect)
+    $insertQuery = 'INSERT INTO sap_vt00 SET vt_cli = ?, vt_pro = ?, vt_can = ?, vt_emp = ?, vt_fec = ?, vt_mon = ?, vt_dev = ?';
 
     $stmtInsert = prepare_or_fail($con, $insertQuery);
 
     // Atomic decrement that never blocks a sale: the delivery already happened physically,
     // so stock may go negative and signals that inventory needs adjusting. NULL counts as 0.
     $stmtDecrementStock = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_stk = COALESCE(pr_stk, 0) - ? WHERE pr_nom = ? AND pr_emp = ? AND deleted_at IS NULL');
+
+    // Returnable products: returned containers go to the empties and the client keeps
+    // cantidad - devueltos containers. Both are atomic increments; the balance may go negative.
+    $stmtAddEmpties = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_vac = pr_vac + ? WHERE pr_nom = ? AND pr_emp = ? AND deleted_at IS NULL');
+
+    $stmtAddBalance = prepare_or_fail($con, 'INSERT INTO sap_ce00 (ce_cli, ce_pro, ce_can, ce_emp) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE ce_can = ce_can + VALUES(ce_can)');
 
     foreach ($data['productos'] as $p) {
         $nombre = isset($p['nombre']) ? $p['nombre'] : null;
@@ -188,7 +200,26 @@ if ($method === 'POST') {
             send_json(["success"=>false,"error"=>"Producto inválido: nombre, cantidad y precio deben estar presentes y ser mayores a 0"], 400);
         }
 
-        mysqli_stmt_bind_param($stmtInsert, 'isiisd', $clienteId, $nombre, $cantidad, $userId, $fecha, $monto);
+        // devueltos is optional (old app versions do not send it): absent counts as 0
+        $devueltos = isset($p['devueltos']) ? parse_non_negative_int($p['devueltos']) : 0;
+
+        if ($devueltos === null) {
+            mysqli_rollback($con);
+
+            send_json(["success"=>false,"error"=>"Envases devueltos inválidos: deben ser un número entero mayor o igual a 0"], 400);
+        }
+
+        $retornable = intval($productos[$nombre]['pr_ret']) === 1;
+
+        if (!$retornable && $devueltos > 0) {
+            mysqli_rollback($con);
+
+            send_json(["success"=>false,"error"=>"El producto $nombre no es retornable"], 400);
+        }
+
+        $vtDev = $retornable ? $devueltos : null;
+
+        mysqli_stmt_bind_param($stmtInsert, 'isiisdi', $clienteId, $nombre, $cantidad, $userId, $fecha, $monto, $vtDev);
 
         if (!mysqli_stmt_execute($stmtInsert)) {
             mysqli_rollback($con);
@@ -203,6 +234,28 @@ if ($method === 'POST') {
             mysqli_rollback($con);
 
             send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtDecrementStock)],500);
+        }
+
+        if ($retornable) {
+            mysqli_stmt_bind_param($stmtAddEmpties, 'isi', $devueltos, $nombre, $userId);
+
+            if (!mysqli_stmt_execute($stmtAddEmpties)) {
+                mysqli_rollback($con);
+
+                send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtAddEmpties)],500);
+            }
+
+            $productoId = intval($productos[$nombre]['pr_ide']);
+
+            $saldo = $cantidad - $devueltos;
+
+            mysqli_stmt_bind_param($stmtAddBalance, 'iiii', $clienteId, $productoId, $saldo, $userId);
+
+            if (!mysqli_stmt_execute($stmtAddBalance)) {
+                mysqli_rollback($con);
+
+                send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtAddBalance)],500);
+            }
         }
 
         // obtener precio
@@ -271,19 +324,74 @@ if ($method==="DELETE") {
         send_json(["success"=>false,"error"=>"ID inválido"],400);
     }
 
+    mysqli_autocommit($con, false);
+
+    // Lock the line so two concurrent deletes cannot revert its containers twice
+    $stmtFind = prepare_or_fail($con, 'SELECT vt_cli, vt_pro, vt_can, vt_dev FROM sap_vt00 WHERE vt_ide = ? AND vt_emp = ? FOR UPDATE');
+
+    mysqli_stmt_bind_param($stmtFind, 'ii', $id, $userId);
+
+    mysqli_stmt_execute($stmtFind);
+
+    $resFind = mysqli_stmt_get_result($stmtFind);
+
+    $venta = $resFind ? mysqli_fetch_assoc($resFind) : null;
+
+    if (!$venta) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>"Venta no encontrada"],404);
+    }
+
+    // Lines with vt_dev revert their container effect; stock and debt are not reverted (as before)
+    if ($venta['vt_dev'] !== null) {
+        $devueltos = intval($venta['vt_dev']);
+
+        $saldo = $devueltos - intval($venta['vt_can']); // -(cantidad - devueltos)
+
+        $clienteId = intval($venta['vt_cli']);
+
+        $stmtEmpties = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_vac = pr_vac - ? WHERE pr_nom = ? AND pr_emp = ?');
+
+        mysqli_stmt_bind_param($stmtEmpties, 'isi', $devueltos, $venta['vt_pro'], $userId);
+
+        if (!mysqli_stmt_execute($stmtEmpties)) {
+            mysqli_rollback($con);
+
+            send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtEmpties)],500);
+        }
+
+        $stmtBalance = prepare_or_fail($con, 'INSERT INTO sap_ce00 (ce_cli, ce_pro, ce_can, ce_emp)
+            SELECT ?, pr_ide, ?, pr_emp FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ?
+            ON DUPLICATE KEY UPDATE ce_can = ce_can + VALUES(ce_can)');
+
+        mysqli_stmt_bind_param($stmtBalance, 'iisi', $clienteId, $saldo, $venta['vt_pro'], $userId);
+
+        if (!mysqli_stmt_execute($stmtBalance)) {
+            mysqli_rollback($con);
+
+            send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtBalance)],500);
+        }
+    }
+
     $stmtDelete = prepare_or_fail($con, 'DELETE FROM sap_vt00 WHERE vt_ide = ? AND vt_emp = ?');
 
     mysqli_stmt_bind_param($stmtDelete, 'ii', $id, $userId);
 
-    if (mysqli_stmt_execute($stmtDelete)) {
+    if (!mysqli_stmt_execute($stmtDelete)) {
+        mysqli_rollback($con);
 
-        if (mysqli_stmt_affected_rows($stmtDelete) > 0) {
-            send_json(["success"=>true,"message"=>"Venta eliminada"]);
-
-        } else {
-            send_json(["success"=>false,"error"=>"Venta no encontrada"],404);
-        }
+        send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtDelete)],500);
     }
+
+    if (!mysqli_commit($con)) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>"No se pudo confirmar la transacción"],500);
+    }
+    mysqli_autocommit($con, true);
+
+    send_json(["success"=>true,"message"=>"Venta eliminada"]);
 }
 
 // other methods not supported

@@ -28,7 +28,8 @@ if (PHP_SAPI === 'cli-server') {
 error_reporting(E_ALL);
 
 const HOST = '127.0.0.1';
-const PORT = 8765;
+// ISOLATION_TEST_PORT overrides the port when 8765 is taken by another server
+define('PORT', (int) (getenv('ISOLATION_TEST_PORT') ?: 8765));
 const DB_HOST = 'localhost';
 const DB_NAME = 'sodapp_test';
 const DB_USER = 'root';
@@ -55,6 +56,13 @@ function check($name, $ok, $detail = '') {
 
 function start_server() {
     $apiDir = realpath(__DIR__ . '/../api');
+    // never run the cases against a server of another checkout
+    $busy = @fsockopen(HOST, PORT, $errno, $errstr, 0.2);
+    if ($busy) {
+        fclose($busy);
+        fwrite(STDERR, 'Port ' . PORT . " is already in use; stop that server or set ISOLATION_TEST_PORT\n");
+        exit(1);
+    }
     $env = array_merge(getenv(), [
         'DB_HOST' => DB_HOST,
         'DB_NAME' => DB_NAME,
@@ -294,8 +302,17 @@ function restore_targets() {
     restore_row('sap_vt00', 'vt_ide', $targetVt);
 }
 
+function table_exists($table) {
+    return db_row('SELECT 1 AS x FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
+        'ss', [DB_NAME, $table]) !== null;
+}
+
 function cleanup() {
     global $maxCl, $maxPr, $maxVt, $addedDeletedAt;
+    // container balances reference clientes and productos (FKs): delete them first
+    if (table_exists('sap_ce00')) {
+        db_exec('DELETE FROM sap_ce00 WHERE ce_cli > ? OR ce_pro > ?', 'ii', [$maxCl, $maxPr]);
+    }
     db_exec('DELETE FROM sap_vt00 WHERE vt_ide > ?', 'i', [$maxVt]);
     db_exec('DELETE FROM sap_pr00 WHERE pr_ide > ?', 'i', [$maxPr]);
     db_exec('DELETE FROM sap_cd00 WHERE cd_cli > ?', 'i', [$maxCl]);
@@ -350,6 +367,9 @@ $authCases = [
     ['GET', 'dias.php', [], null],
     ['GET', 'dias.php', ['id' => $targetClId], null],
     ['PUT', 'dias.php', [], ['cl_ide' => 999999]],
+    ['GET', 'envases.php', ['clienteId' => 999999], null],
+    ['POST', 'envases.php', [], ['accion' => 'llenar', 'producto' => MARKER . 'none', 'cantidad' => 1]],
+    ['PUT', 'envases.php', [], ['clienteId' => 999999, 'productoId' => 999999, 'cantidad' => 1]],
 ];
 foreach ($authCases as $c) {
     list($method, $path, $query, $body) = $c;
@@ -631,6 +651,312 @@ $row = db_row('SELECT pr_ide FROM sap_pr00 WHERE pr_ide = ? AND deleted_at IS NU
 check("Congre DELETE own producto left Ariza's same-name producto active", $row !== null);
 restore_row('sap_pr00', 'pr_ide', $dupProduct);
 expect_status('Congre DELETE own cliente', 200, http('DELETE', 'clientes.php', ['id' => $congreClId], null, $tokC));
+
+// ---------------------------------------------------------------- 6. returnable containers (envases)
+
+echo "\n# Returnable containers: products, sales, refill and client balance\n";
+
+function pr_row($id) {
+    return db_row('SELECT pr_ret, pr_vac, pr_stk, pr_val FROM sap_pr00 WHERE pr_ide = ?', 'i', [$id]);
+}
+
+// Client container balance, or null when there is no sap_ce00 row.
+function ce_can($clienteId, $productoId) {
+    $row = db_row('SELECT ce_can FROM sap_ce00 WHERE ce_cli = ? AND ce_pro = ?', 'ii', [$clienteId, $productoId]);
+    return $row === null ? null : (int) $row['ce_can'];
+}
+
+function cl_debt($clienteId) {
+    return (float) db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$clienteId])['cl_deb'];
+}
+
+function ventas_of($clienteId) {
+    global $maxVt;
+    return db_rows('SELECT vt_ide, vt_pro, vt_can, vt_dev FROM sap_vt00 WHERE vt_cli = ? AND vt_ide > ? ORDER BY vt_ide', 'ii', [$clienteId, $maxVt]);
+}
+
+function pr_id_by_name($name) {
+    global $maxPr;
+    $row = db_row('SELECT pr_ide FROM sap_pr00 WHERE pr_nom = ? AND pr_ide > ?', 'si', [$name, $maxPr]);
+    return $row ? (int) $row['pr_ide'] : 0;
+}
+
+$retName = MARKER . 'ret_' . $suffix;
+$ret2Name = MARKER . 'rettwo_' . $suffix;
+$plainName = MARKER . 'plain_' . $suffix;
+$envClName = MARKER . 'envcli_' . $suffix;
+
+// S4 POST: retornable / vacios are optional; an old app POST creates a non-returnable product
+$r = http('POST', 'productos.php', [], ['nombrePr' => $retName, 'precioUni' => 100, 'stock' => 10, 'retornable' => true, 'vacios' => 3], $tokA);
+expect_status('Ariza POST returnable producto with vacios', 201, $r);
+$retId = pr_id_by_name($retName);
+$row = pr_row($retId);
+check('POST returnable producto saved pr_ret=1, pr_vac=3, pr_stk=10', $row && (int) $row['pr_ret'] === 1
+    && (int) $row['pr_vac'] === 3 && (int) $row['pr_stk'] === 10, json_encode($row));
+
+expect_status('Ariza POST returnable producto without vacios', 201, http('POST', 'productos.php', [], [
+    'nombrePr' => $ret2Name, 'precioUni' => 80, 'stock' => 4, 'retornable' => true,
+], $tokA));
+$ret2Id = pr_id_by_name($ret2Name);
+$row = pr_row($ret2Id);
+check('POST returnable producto without vacios defaults pr_vac=0', $row && (int) $row['pr_ret'] === 1 && (int) $row['pr_vac'] === 0, json_encode($row));
+
+$r = http('POST', 'productos.php', [], ['nombrePr' => $plainName, 'precioUni' => 50, 'stock' => 5], $tokA);
+expect_status('Ariza POST producto old shape (no retornable/vacios)', 201, $r);
+check('POST producto old shape keeps the same response body', isset($r[1]['success'], $r[1]['message'], $r[1]['id'])
+    && $r[1]['success'] === true && $r[1]['message'] === 'Producto creado', short($r[2]));
+$plainId = pr_id_by_name($plainName);
+$row = pr_row($plainId);
+check('POST producto old shape saved pr_ret=0, pr_vac=0', $row && (int) $row['pr_ret'] === 0 && (int) $row['pr_vac'] === 0
+    && (int) $row['pr_stk'] === 5, json_encode($row));
+
+$badName = MARKER . 'bad_' . $suffix;
+expect_status('POST producto with negative vacios -> 400', 400, http('POST', 'productos.php', [], [
+    'nombrePr' => $badName, 'precioUni' => 1, 'stock' => 1, 'retornable' => true, 'vacios' => -1,
+], $tokA));
+expect_status('POST producto with non-integer vacios -> 400', 400, http('POST', 'productos.php', [], [
+    'nombrePr' => $badName, 'precioUni' => 1, 'stock' => 1, 'retornable' => true, 'vacios' => 1.5,
+], $tokA));
+expect_status('POST producto with invalid retornable -> 400', 400, http('POST', 'productos.php', [], [
+    'nombrePr' => $badName, 'precioUni' => 1, 'stock' => 1, 'retornable' => 'x',
+], $tokA));
+check('Invalid producto POSTs inserted nothing', pr_id_by_name($badName) === 0);
+
+// S4 GET returns pr_ret and pr_vac
+list(, $j) = http('GET', 'productos.php', [], null, $tokA);
+$entry = null;
+foreach (list_of($j, 'productos') as $p) if ((int) $p['pr_ide'] === $retId) $entry = $p;
+check('GET productos list returns pr_ret and pr_vac', $entry !== null && array_key_exists('pr_ret', $entry)
+    && array_key_exists('pr_vac', $entry) && (int) $entry['pr_ret'] === 1 && (int) $entry['pr_vac'] === 3, json_encode($entry));
+list(, $j) = http('GET', 'productos.php', ['nombre' => $retName], null, $tokA);
+check('GET producto by name returns pr_ret and pr_vac', isset($j['producto']['pr_ret'], $j['producto']['pr_vac'])
+    && (int) $j['producto']['pr_ret'] === 1 && (int) $j['producto']['pr_vac'] === 3, json_encode($j));
+
+// S4 PUT: an old app PUT (nombre, precio, cantidad) leaves pr_ret / pr_vac untouched
+$r = http('PUT', 'productos.php', ['nombre' => $retName, 'precio' => 110, 'cantidad' => 20], null, $tokA);
+expect_status('Ariza PUT producto old shape', 200, $r);
+check('PUT producto old shape keeps the same response body', $r[2] === json_encode(['success' => true, 'message' => 'Producto actualizado']), short($r[2]));
+$row = pr_row($retId);
+check('PUT producto old shape updated price and stock, left pr_ret/pr_vac', $row && (float) $row['pr_val'] === 110.0
+    && (int) $row['pr_stk'] === 20 && (int) $row['pr_ret'] === 1 && (int) $row['pr_vac'] === 3, json_encode($row));
+
+expect_status('Ariza PUT producto with retornable=1 and vacios=2', 200, http('PUT', 'productos.php', [
+    'nombre' => $plainName, 'precio' => 50, 'cantidad' => 5, 'retornable' => 1, 'vacios' => 2,
+], null, $tokA));
+$row = pr_row($plainId);
+check('PUT producto set pr_ret=1 and absolute pr_vac=2', $row && (int) $row['pr_ret'] === 1 && (int) $row['pr_vac'] === 2, json_encode($row));
+expect_status('Ariza PUT producto with retornable=0 and vacios=0', 200, http('PUT', 'productos.php', [
+    'nombre' => $plainName, 'precio' => 50, 'cantidad' => 5, 'retornable' => 0, 'vacios' => 0,
+], null, $tokA));
+$row = pr_row($plainId);
+check('PUT producto set pr_ret=0 and pr_vac=0', $row && (int) $row['pr_ret'] === 0 && (int) $row['pr_vac'] === 0, json_encode($row));
+expect_status('PUT producto with negative vacios -> 400', 400, http('PUT', 'productos.php', [
+    'nombre' => $retName, 'precio' => 1, 'cantidad' => 1, 'vacios' => -1,
+], null, $tokA));
+expect_status('PUT producto with retornable=2 -> 400', 400, http('PUT', 'productos.php', [
+    'nombre' => $retName, 'precio' => 1, 'cantidad' => 1, 'retornable' => 2,
+], null, $tokA));
+$row = pr_row($retId);
+check('Invalid producto PUTs changed nothing', $row && (float) $row['pr_val'] === 110.0 && (int) $row['pr_stk'] === 20
+    && (int) $row['pr_ret'] === 1 && (int) $row['pr_vac'] === 3, json_encode($row));
+expect_status('Congre PUT vacios of Ariza producto', 404, http('PUT', 'productos.php', [
+    'nombre' => $retName, 'precio' => 1, 'cantidad' => 1, 'retornable' => 0, 'vacios' => 99,
+], null, $tokC));
+$row = pr_row($retId);
+check('Congre PUT vacios of Ariza producto changed nothing', $row && (int) $row['pr_ret'] === 1 && (int) $row['pr_vac'] === 3, json_encode($row));
+
+// A cliente of Ariza for the sales below
+expect_status('Ariza creates cliente for envases', 201, http('POST', 'clientes.php', [], [
+    'nombreCl' => $envClName, 'numTelCl' => '351000002', 'direccionCl' => 'Calle test 3',
+], $tokA));
+$row = db_row('SELECT cl_ide FROM sap_cl00 WHERE cl_nom = ? AND cl_ide > ?', 'si', [$envClName, $maxCl]);
+$envClId = $row ? (int) $row['cl_ide'] : 0;
+
+// S2 POST venta with devueltos: vt_dev, pr_vac and the client balance move in the same transaction
+$debt0 = cl_debt($envClId);
+$r = http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $retName, 'cantidad' => 5, 'precio' => 100, 'devueltos' => 2],
+    ['nombre' => $plainName, 'cantidad' => 1, 'precio' => 50],
+]], $tokA);
+expect_status('POST venta with devueltos on a returnable producto', 201, $r);
+check('POST venta with devueltos keeps the same response body',
+    $r[2] === json_encode(['success' => true, 'message' => 'Ventas registradas correctamente']), short($r[2]));
+$vts = ventas_of($envClId);
+check('Returnable line saved vt_dev=2, non-returnable line vt_dev=NULL', count($vts) === 2
+    && $vts[0]['vt_pro'] === $retName && $vts[0]['vt_dev'] !== null && (int) $vts[0]['vt_dev'] === 2
+    && $vts[1]['vt_pro'] === $plainName && $vts[1]['vt_dev'] === null, json_encode($vts));
+$row = pr_row($retId);
+check('Venta added devueltos to pr_vac (3+2) and decremented pr_stk (20-5)', $row && (int) $row['pr_vac'] === 5 && (int) $row['pr_stk'] === 15, json_encode($row));
+check('Venta set client balance to cantidad - devueltos (5-2=3)', ce_can($envClId, $retId) === 3, var_export(ce_can($envClId, $retId), true));
+check('Venta created no balance row for the non-returnable producto', ce_can($envClId, $plainId) === null);
+$row = pr_row($plainId);
+check('Non-returnable producto: pr_vac unchanged, pr_stk decremented (5-1)', $row && (int) $row['pr_vac'] === 0 && (int) $row['pr_stk'] === 4, json_encode($row));
+check('Venta with devueltos added the debt (5*100 + 1*50)', cl_debt($envClId) === $debt0 + 550, 'debt=' . cl_debt($envClId));
+$row = db_row('SELECT ce_emp FROM sap_ce00 WHERE ce_cli = ? AND ce_pro = ?', 'ii', [$envClId, $retId]);
+check('Balance row is owned by Ariza', $row && (int) $row['ce_emp'] === $arizaId, json_encode($row));
+
+$r = http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $retName, 'cantidad' => 1, 'precio' => 100, 'devueltos' => 6],
+]], $tokA);
+expect_status('POST venta returning more than delivered', 201, $r);
+check('Balance accumulates atomically and may go negative (3 + 1 - 6 = -2)', ce_can($envClId, $retId) === -2, var_export(ce_can($envClId, $retId), true));
+check('pr_vac accumulates (5+6=11)', (int) pr_row($retId)['pr_vac'] === 11);
+$vts = ventas_of($envClId);
+$returnLineId = isset($vts[2]) ? (int) $vts[2]['vt_ide'] : 0;
+
+// Old app versions send no devueltos: treated as 0
+$debt1 = cl_debt($envClId);
+$r = http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $retName, 'cantidad' => 2, 'precio' => 100],
+]], $tokA);
+expect_status('POST venta old shape (no devueltos) on a returnable producto', 201, $r);
+$vts = ventas_of($envClId);
+$last = end($vts);
+check('Old shape on returnable producto saved vt_dev=0', $last && $last['vt_dev'] !== null && (int) $last['vt_dev'] === 0, json_encode($last));
+check('Old shape on returnable producto: balance += cantidad (-2+2=0), pr_vac unchanged', ce_can($envClId, $retId) === 0
+    && (int) pr_row($retId)['pr_vac'] === 11, var_export(ce_can($envClId, $retId), true));
+$stockBefore = (int) pr_row($plainId)['pr_stk'];
+$r = http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $plainName, 'cantidad' => 2, 'precio' => 50],
+]], $tokA);
+expect_status('POST venta old shape on a non-returnable producto', 201, $r);
+check('POST venta old shape keeps the same response body',
+    $r[2] === json_encode(['success' => true, 'message' => 'Ventas registradas correctamente']), short($r[2]));
+$vts = ventas_of($envClId);
+$last = end($vts);
+check('Old shape on non-returnable producto: vt_dev NULL, stock decremented, no balance row', $last && $last['vt_dev'] === null
+    && (int) pr_row($plainId)['pr_stk'] === $stockBefore - 2 && ce_can($envClId, $plainId) === null, json_encode($last));
+check('Old shape ventas added the debt (2*100 + 2*50)', cl_debt($envClId) === $debt1 + 300, 'debt=' . cl_debt($envClId));
+
+// Rejected ventas persist nothing
+function envases_state() {
+    global $envClId, $retId, $plainId;
+    return json_encode([count(ventas_of($envClId)), pr_row($retId), pr_row($plainId), ce_can($envClId, $retId), ce_can($envClId, $plainId), cl_debt($envClId)]);
+}
+$state = envases_state();
+$r = http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $retName, 'cantidad' => 1, 'precio' => 100, 'devueltos' => 1],
+    ['nombre' => $plainName, 'cantidad' => 1, 'precio' => 50, 'devueltos' => 1],
+]], $tokA);
+expect_status('POST venta with devueltos on a non-returnable producto -> 400', 400, $r);
+check('Non-returnable devueltos error message', $r[2] === json_encode(['success' => false, 'error' => "El producto $plainName no es retornable"]), short($r[2]));
+check('Non-returnable devueltos: nothing persisted (rollback)', envases_state() === $state, envases_state());
+foreach ([[-1, 'negative'], ['abc', 'non-numeric'], [1.5, 'non-integer']] as $c) {
+    $r = http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+        ['nombre' => $retName, 'cantidad' => 2, 'precio' => 100, 'devueltos' => $c[0]],
+    ]], $tokA);
+    expect_status("POST venta with {$c[1]} devueltos -> 400", 400, $r);
+    check("POST venta with {$c[1]} devueltos: nothing persisted", envases_state() === $state, envases_state());
+}
+
+// S3 DELETE venta reverts pr_vac and the balance of lines with vt_dev
+$stockBefore = (int) pr_row($retId)['pr_stk'];
+expect_status('Congre DELETE Ariza venta with devueltos', 404, http('DELETE', 'ventas.php', ['id' => $returnLineId], null, $tokC));
+check('Congre DELETE Ariza venta with devueltos: nothing changed', envases_state() === $state, envases_state());
+$r = http('DELETE', 'ventas.php', ['id' => $returnLineId], null, $tokA);
+expect_status('Ariza DELETE venta line with vt_dev=6', 200, $r);
+check('DELETE venta keeps the same response body', $r[2] === json_encode(['success' => true, 'message' => 'Venta eliminada']), short($r[2]));
+check('DELETE venta reverted pr_vac (11-6=5), stock untouched', (int) pr_row($retId)['pr_vac'] === 5
+    && (int) pr_row($retId)['pr_stk'] === $stockBefore, json_encode(pr_row($retId)));
+check('DELETE venta reverted the balance (0 - (1-6) = 5)', ce_can($envClId, $retId) === 5, var_export(ce_can($envClId, $retId), true));
+check('DELETE venta removed the line', db_row('SELECT 1 AS x FROM sap_vt00 WHERE vt_ide = ?', 'i', [$returnLineId]) === null);
+$vts = ventas_of($envClId);
+$plainLineId = isset($vts[1]) ? (int) $vts[1]['vt_ide'] : 0;
+$plainBefore = pr_row($plainId);
+expect_status('Ariza DELETE venta line with vt_dev NULL', 200, http('DELETE', 'ventas.php', ['id' => $plainLineId], null, $tokA));
+check('DELETE venta with vt_dev NULL: producto and balance unchanged', pr_row($plainId) === $plainBefore
+    && ce_can($envClId, $plainId) === null && ce_can($envClId, $retId) === 5, json_encode(pr_row($plainId)));
+expect_status('DELETE venta already deleted -> 404', 404, http('DELETE', 'ventas.php', ['id' => $returnLineId], null, $tokA));
+check('Second DELETE did not revert twice', (int) pr_row($retId)['pr_vac'] === 5 && ce_can($envClId, $retId) === 5);
+
+// S5 refill: empties become full units, atomically
+$before = pr_row($retId);
+$r = http('POST', 'envases.php', [], ['accion' => 'llenar', 'producto' => $retName, 'cantidad' => 4], $tokA);
+expect_status('Ariza llenar 4 envases', 200, $r);
+check('llenar returns the updated producto', isset($r[1]['success'], $r[1]['producto']) && $r[1]['success'] === true
+    && (int) $r[1]['producto']['pr_ide'] === $retId && (int) $r[1]['producto']['pr_vac'] === 1
+    && (int) $r[1]['producto']['pr_stk'] === (int) $before['pr_stk'] + 4, short($r[2]));
+$row = pr_row($retId);
+check('llenar moved 4 from pr_vac to pr_stk in DB', (int) $row['pr_vac'] === 1 && (int) $row['pr_stk'] === (int) $before['pr_stk'] + 4, json_encode($row));
+$before = pr_row($retId);
+$r = http('POST', 'envases.php', [], ['accion' => 'llenar', 'producto' => $retName, 'cantidad' => 2], $tokA);
+expect_status('llenar more than the empties -> 409', 409, $r);
+check('llenar 409 error message', $r[2] === json_encode(['success' => false, 'error' => 'No hay suficientes envases vacíos']), short($r[2]));
+check('llenar 409 changed nothing', pr_row($retId) === $before, json_encode(pr_row($retId)));
+expect_status('llenar a non-returnable producto -> 400', 400, http('POST', 'envases.php', [], [
+    'accion' => 'llenar', 'producto' => $plainName, 'cantidad' => 1,
+], $tokA));
+expect_status('llenar an unknown producto -> 404', 404, http('POST', 'envases.php', [], [
+    'accion' => 'llenar', 'producto' => MARKER . 'none', 'cantidad' => 1,
+], $tokA));
+expect_status('Congre llenar Ariza producto -> 404', 404, http('POST', 'envases.php', [], [
+    'accion' => 'llenar', 'producto' => $retName, 'cantidad' => 1,
+], $tokC));
+foreach ([[0, 'zero'], [-1, 'negative'], ['x', 'non-numeric'], [1.5, 'non-integer']] as $c) {
+    expect_status("llenar with {$c[1]} cantidad -> 400", 400, http('POST', 'envases.php', [], [
+        'accion' => 'llenar', 'producto' => $retName, 'cantidad' => $c[0],
+    ], $tokA));
+}
+expect_status('envases POST with unknown accion -> 400', 400, http('POST', 'envases.php', [], [
+    'accion' => 'vaciar', 'producto' => $retName, 'cantidad' => 1,
+], $tokA));
+check('Rejected llenar requests changed nothing', pr_row($retId) === $before, json_encode(pr_row($retId)));
+
+// S6 GET client balance: every owned, non-deleted returnable producto, 0 when no row
+$r = http('GET', 'envases.php', ['clienteId' => $envClId], null, $tokA);
+expect_status('Ariza GET envases of her cliente', 200, $r);
+$byId = [];
+foreach (list_of($r[1], 'envases') as $e) $byId[(int) $e['pr_ide']] = $e;
+check('GET envases lists the returnable producto with its balance', isset($byId[$retId])
+    && array_keys($byId[$retId]) === ['pr_ide', 'pr_nom', 'ce_can'] && $byId[$retId]['pr_nom'] === $retName
+    && (int) $byId[$retId]['ce_can'] === 5, short($r[2]));
+check('GET envases lists a returnable producto without balance row as 0', isset($byId[$ret2Id]) && (int) $byId[$ret2Id]['ce_can'] === 0, short($r[2]));
+check('GET envases omits non-returnable productos', !isset($byId[$plainId]));
+db_exec('UPDATE sap_pr00 SET deleted_at = CURDATE() WHERE pr_ide = ?', 'i', [$ret2Id]);
+list(, $j) = http('GET', 'envases.php', ['clienteId' => $envClId], null, $tokA);
+check('GET envases omits deleted productos', isset($j['envases']) && !in_array($ret2Id, ids(list_of($j, 'envases'), 'pr_ide'), true));
+db_exec('UPDATE sap_pr00 SET deleted_at = NULL WHERE pr_ide = ?', 'i', [$ret2Id]);
+expect_status('Congre GET envases of Ariza cliente -> 404', 404, http('GET', 'envases.php', ['clienteId' => $envClId], null, $tokC));
+expect_status('GET envases of an unknown cliente -> 404', 404, http('GET', 'envases.php', ['clienteId' => 999999], null, $tokA));
+
+// S6 PUT sets the absolute balance (upsert)
+$r = http('PUT', 'envases.php', [], ['clienteId' => $envClId, 'productoId' => $retId, 'cantidad' => 10], $tokA);
+expect_status('Ariza PUT envases balance of existing row', 200, $r);
+check('PUT envases set the absolute balance (10)', ce_can($envClId, $retId) === 10, var_export(ce_can($envClId, $retId), true));
+expect_status('Ariza PUT envases balance without row (upsert)', 200, http('PUT', 'envases.php', [], [
+    'clienteId' => $envClId, 'productoId' => $ret2Id, 'cantidad' => 7,
+], $tokA));
+$row = db_row('SELECT ce_can, ce_emp FROM sap_ce00 WHERE ce_cli = ? AND ce_pro = ?', 'ii', [$envClId, $ret2Id]);
+check('PUT envases inserted the row owned by Ariza', $row && (int) $row['ce_can'] === 7 && (int) $row['ce_emp'] === $arizaId, json_encode($row));
+expect_status('Ariza PUT envases balance to 0', 200, http('PUT', 'envases.php', [], [
+    'clienteId' => $envClId, 'productoId' => $ret2Id, 'cantidad' => 0,
+], $tokA));
+check('PUT envases accepts 0', ce_can($envClId, $ret2Id) === 0);
+$ceState = json_encode([ce_can($envClId, $retId), ce_can($envClId, $ret2Id), ce_can($envClId, $plainId)]);
+foreach ([[-1, 'negative'], ['x', 'non-numeric'], [1.5, 'non-integer']] as $c) {
+    expect_status("PUT envases with {$c[1]} cantidad -> 400", 400, http('PUT', 'envases.php', [], [
+        'clienteId' => $envClId, 'productoId' => $retId, 'cantidad' => $c[0],
+    ], $tokA));
+}
+expect_status('PUT envases on a non-returnable producto -> 400', 400, http('PUT', 'envases.php', [], [
+    'clienteId' => $envClId, 'productoId' => $plainId, 'cantidad' => 1,
+], $tokA));
+expect_status('PUT envases on an unknown producto -> 404', 404, http('PUT', 'envases.php', [], [
+    'clienteId' => $envClId, 'productoId' => 999999, 'cantidad' => 1,
+], $tokA));
+expect_status('Congre PUT envases on Ariza cliente -> 404', 404, http('PUT', 'envases.php', [], [
+    'clienteId' => $envClId, 'productoId' => $retId, 'cantidad' => 1,
+], $tokC));
+check('Rejected envases PUTs changed nothing', json_encode([ce_can($envClId, $retId), ce_can($envClId, $ret2Id), ce_can($envClId, $plainId)]) === $ceState);
+
+// Soft-deleted cliente: balance neither readable nor writable
+db_exec('UPDATE sap_cl00 SET is_deleted = 1 WHERE cl_ide = ?', 'i', [$envClId]);
+expect_status('GET envases of a soft-deleted cliente -> 404', 404, http('GET', 'envases.php', ['clienteId' => $envClId], null, $tokA));
+expect_status('PUT envases of a soft-deleted cliente -> 404', 404, http('PUT', 'envases.php', [], [
+    'clienteId' => $envClId, 'productoId' => $retId, 'cantidad' => 1,
+], $tokA));
+check('PUT envases of a soft-deleted cliente changed nothing', ce_can($envClId, $retId) === 10);
+db_exec('UPDATE sap_cl00 SET is_deleted = 0 WHERE cl_ide = ?', 'i', [$envClId]);
 
 // ---------------------------------------------------------------- summary
 
