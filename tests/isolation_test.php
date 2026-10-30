@@ -1071,6 +1071,40 @@ db_exec('UPDATE sap_pr00 SET deleted_at = CURDATE() WHERE pr_ide = ?', 'i', [$hi
 expect_status('GET movimientos of a soft-deleted producto -> 404', 404, http('GET', 'movimientos.php', ['productoId' => $histId], null, $tokA));
 db_exec('UPDATE sap_pr00 SET deleted_at = NULL WHERE pr_ide = ?', 'i', [$histId]);
 
+// Deleting a sale reverts its amount from the debt, even below zero (credit balance)
+function deuda_of($clienteId) {
+    return (int) db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$clienteId])['cl_deb'];
+}
+function last_venta_of($name, $userId) {
+    return (int) db_row('SELECT MAX(vt_ide) AS id FROM sap_vt00 WHERE vt_pro = ? AND vt_emp = ?', 'si', [$name, $userId])['id'];
+}
+$debtBefore = deuda_of($envClId);
+db_exec('UPDATE sap_cl00 SET cl_deb = 0 WHERE cl_ide = ?', 'i', [$envClId]);
+expect_status('Ariza POST venta of 1000 for debt revert', 201, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $histName, 'cantidad' => 2, 'precio' => 500],
+]], $tokA));
+$debtVtId = last_venta_of($histName, $arizaId);
+expect_status('Ariza pays 700 of the 1000', 200, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 700], null, $tokA));
+check('Debt after paying 700 of 1000 is 300', deuda_of($envClId) === 300, (string) deuda_of($envClId));
+
+expect_status('Congre DELETE Ariza venta with revertir_deuda -> 404', 404, http('DELETE', 'ventas.php', ['id' => $debtVtId, 'revertir_deuda' => 1], null, $tokC));
+check('Rejected DELETE left the debt unchanged', deuda_of($envClId) === 300, (string) deuda_of($envClId));
+
+expect_status('Ariza DELETE paid venta with revertir_deuda', 200, http('DELETE', 'ventas.php', ['id' => $debtVtId, 'revertir_deuda' => 1], null, $tokA));
+check('Deleting a partly paid venta leaves a credit balance of -700', deuda_of($envClId) === -700, (string) deuda_of($envClId));
+list(, $j) = http('GET', 'deudaCliente.php', ['id' => $envClId], null, $tokA);
+check('GET deudaCliente returns the credit balance', isset($j['deudor']['cl_deb']) && (int) $j['deudor']['cl_deb'] === -700, json_encode($j));
+
+expect_status('Ariza POST venta of 500 consumes the credit', 201, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $histName, 'cantidad' => 1, 'precio' => 500],
+]], $tokA));
+check('Next venta consumes the credit balance (-200)', deuda_of($envClId) === -200, (string) deuda_of($envClId));
+
+// Older app versions revert the debt themselves after the DELETE
+expect_status('Ariza DELETE venta without revertir_deuda', 200, http('DELETE', 'ventas.php', ['id' => last_venta_of($histName, $arizaId)], null, $tokA));
+check('DELETE without revertir_deuda leaves the debt unchanged', deuda_of($envClId) === -200, (string) deuda_of($envClId));
+db_exec('UPDATE sap_cl00 SET cl_deb = ? WHERE cl_ide = ?', 'ii', [$debtBefore, $envClId]);
+
 // ---------------------------------------------------------------- summary
 
 echo "\n$passes passed, $failures failed\n";
