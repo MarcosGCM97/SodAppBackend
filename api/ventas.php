@@ -343,7 +343,21 @@ if ($method==="DELETE") {
         send_json(["success"=>false,"error"=>"Venta no encontrada"],404);
     }
 
-    // Lines with vt_dev revert their container effect; stock and debt are not reverted (as before)
+    // The sold units go back to stock. Debt is not reverted here: the app reverts it
+    // through deudaCliente.php after this call, so doing it here would subtract it twice.
+    $stmtRestoreStock = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_stk = COALESCE(pr_stk, 0) + ? WHERE pr_nom = ? AND pr_emp = ?');
+
+    $cantidad = intval($venta['vt_can']);
+
+    mysqli_stmt_bind_param($stmtRestoreStock, 'isi', $cantidad, $venta['vt_pro'], $userId);
+
+    if (!mysqli_stmt_execute($stmtRestoreStock)) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtRestoreStock)],500);
+    }
+
+    // Lines with vt_dev also revert their container effect
     if ($venta['vt_dev'] !== null) {
         $devueltos = intval($venta['vt_dev']);
 

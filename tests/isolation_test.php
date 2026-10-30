@@ -765,6 +765,19 @@ expect_status('Congre PUT vacios of Ariza producto', 404, http('PUT', 'productos
 $row = pr_row($retId);
 check('Congre PUT vacios of Ariza producto changed nothing', $row && (int) $row['pr_ret'] === 1 && (int) $row['pr_vac'] === 3, json_encode($row));
 
+// PUT filters soft-deleted productos, not updated_at: a row with updated_at set stays editable
+db_exec('UPDATE sap_pr00 SET updated_at = CURDATE() WHERE pr_ide = ?', 'i', [$retId]);
+expect_status('Ariza PUT producto with updated_at set', 200, http('PUT', 'productos.php', [
+    'nombre' => $retName, 'precio' => 110, 'cantidad' => 20,
+], null, $tokA));
+check('PUT producto with updated_at set saved the values', (float) pr_row($retId)['pr_val'] === 110.0 && (int) pr_row($retId)['pr_stk'] === 20, json_encode(pr_row($retId)));
+db_exec('UPDATE sap_pr00 SET updated_at = NULL, deleted_at = CURDATE() WHERE pr_ide = ?', 'i', [$retId]);
+expect_status('PUT soft-deleted producto -> 404', 404, http('PUT', 'productos.php', [
+    'nombre' => $retName, 'precio' => 999, 'cantidad' => 99,
+], null, $tokA));
+check('PUT soft-deleted producto changed nothing', (float) pr_row($retId)['pr_val'] === 110.0 && (int) pr_row($retId)['pr_stk'] === 20, json_encode(pr_row($retId)));
+db_exec('UPDATE sap_pr00 SET deleted_at = NULL WHERE pr_ide = ?', 'i', [$retId]);
+
 // A cliente of Ariza for the sales below
 expect_status('Ariza creates cliente for envases', 201, http('POST', 'clientes.php', [], [
     'nombreCl' => $envClName, 'numTelCl' => '351000002', 'direccionCl' => 'Calle test 3',
@@ -856,18 +869,23 @@ check('Congre DELETE Ariza venta with devueltos: nothing changed', envases_state
 $r = http('DELETE', 'ventas.php', ['id' => $returnLineId], null, $tokA);
 expect_status('Ariza DELETE venta line with vt_dev=6', 200, $r);
 check('DELETE venta keeps the same response body', $r[2] === json_encode(['success' => true, 'message' => 'Venta eliminada']), short($r[2]));
-check('DELETE venta reverted pr_vac (11-6=5), stock untouched', (int) pr_row($retId)['pr_vac'] === 5
-    && (int) pr_row($retId)['pr_stk'] === $stockBefore, json_encode(pr_row($retId)));
+check('DELETE venta reverted pr_vac (11-6=5) and restored the sold unit to stock', (int) pr_row($retId)['pr_vac'] === 5
+    && (int) pr_row($retId)['pr_stk'] === $stockBefore + 1, json_encode(pr_row($retId)));
 check('DELETE venta reverted the balance (0 - (1-6) = 5)', ce_can($envClId, $retId) === 5, var_export(ce_can($envClId, $retId), true));
 check('DELETE venta removed the line', db_row('SELECT 1 AS x FROM sap_vt00 WHERE vt_ide = ?', 'i', [$returnLineId]) === null);
 $vts = ventas_of($envClId);
 $plainLineId = isset($vts[1]) ? (int) $vts[1]['vt_ide'] : 0;
+$plainLineCan = isset($vts[1]) ? (int) $vts[1]['vt_can'] : 0;
 $plainBefore = pr_row($plainId);
+$plainBefore['pr_stk'] = (string) ((int) $plainBefore['pr_stk'] + $plainLineCan);
 expect_status('Ariza DELETE venta line with vt_dev NULL', 200, http('DELETE', 'ventas.php', ['id' => $plainLineId], null, $tokA));
-check('DELETE venta with vt_dev NULL: producto and balance unchanged', pr_row($plainId) === $plainBefore
-    && ce_can($envClId, $plainId) === null && ce_can($envClId, $retId) === 5, json_encode(pr_row($plainId)));
+check('DELETE venta with vt_dev NULL: stock restored, containers and balance unchanged', $plainLineCan > 0
+    && pr_row($plainId) == $plainBefore && ce_can($envClId, $plainId) === null && ce_can($envClId, $retId) === 5,
+    json_encode([pr_row($plainId), $plainBefore]));
+$stockAfterDelete = (int) pr_row($retId)['pr_stk'];
 expect_status('DELETE venta already deleted -> 404', 404, http('DELETE', 'ventas.php', ['id' => $returnLineId], null, $tokA));
-check('Second DELETE did not revert twice', (int) pr_row($retId)['pr_vac'] === 5 && ce_can($envClId, $retId) === 5);
+check('Second DELETE did not revert twice', (int) pr_row($retId)['pr_vac'] === 5 && ce_can($envClId, $retId) === 5
+    && (int) pr_row($retId)['pr_stk'] === $stockAfterDelete);
 
 // S5 refill: empties become full units, atomically
 $before = pr_row($retId);
