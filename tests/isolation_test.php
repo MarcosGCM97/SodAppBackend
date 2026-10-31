@@ -980,6 +980,30 @@ expect_status('PUT envases of a soft-deleted cliente -> 404', 404, http('PUT', '
 check('PUT envases of a soft-deleted cliente changed nothing', ce_can($envClId, $retId) === 10);
 db_exec('UPDATE sap_cl00 SET is_deleted = 0 WHERE cl_ide = ?', 'i', [$envClId]);
 
+// GET productos: pr_cli = containers held by the owner's non-deleted clientes (sum of ce_can)
+function productos_by_id($json) {
+    $byId = [];
+    foreach (list_of($json, 'productos') as $p) $byId[(int) $p['pr_ide']] = $p;
+    return $byId;
+}
+list(, $j) = http('GET', 'productos.php', [], null, $tokA);
+$byId = productos_by_id($j);
+check('GET productos returns pr_cli with the client balance (10)', isset($byId[$retId]['pr_cli'])
+    && (int) $byId[$retId]['pr_cli'] === 10, json_encode($byId[$retId] ?? null));
+check('GET productos returns pr_cli 0 for a returnable producto with balance 0', isset($byId[$ret2Id]['pr_cli'])
+    && (int) $byId[$ret2Id]['pr_cli'] === 0, json_encode($byId[$ret2Id] ?? null));
+check('GET productos returns pr_cli 0 for a non-returnable producto', isset($byId[$plainId]['pr_cli'])
+    && (int) $byId[$plainId]['pr_cli'] === 0, json_encode($byId[$plainId] ?? null));
+list(, $j) = http('GET', 'productos.php', ['nombre' => $retName], null, $tokA);
+check('GET producto by nombre returns pr_cli (10)', isset($j['producto']['pr_cli'])
+    && (int) $j['producto']['pr_cli'] === 10, json_encode($j));
+db_exec('UPDATE sap_cl00 SET is_deleted = 1 WHERE cl_ide = ?', 'i', [$envClId]);
+list(, $j) = http('GET', 'productos.php', [], null, $tokA);
+$byId = productos_by_id($j);
+check('GET productos pr_cli ignores soft-deleted clientes', isset($byId[$retId]['pr_cli'])
+    && (int) $byId[$retId]['pr_cli'] === 0, json_encode($byId[$retId] ?? null));
+db_exec('UPDATE sap_cl00 SET is_deleted = 0 WHERE cl_ide = ?', 'i', [$envClId]);
+
 // ---------------------------------------------------------------- 7. stock movement history (historial de stock)
 
 echo "\n# Stock movement history: every stock change is recorded and listed newest first\n";
