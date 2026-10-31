@@ -93,9 +93,27 @@ if ($method === 'POST') {
 
     mysqli_stmt_bind_param($stmt, 'iiiii', $cantidad, $cantidad, $productoId, $userId, $cantidad);
 
-    if (!mysqli_stmt_execute($stmt)) send_json(["success"=>false,"error"=>mysqli_stmt_error($stmt)],500);
+    // The refill and its "llenado" movement are saved together
+    mysqli_autocommit($con, false);
 
-    if (mysqli_stmt_affected_rows($stmt) === 0) send_json(["success"=>false,"error"=>"No hay suficientes envases vacíos"],409);
+    if (!mysqli_stmt_execute($stmt)) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>mysqli_stmt_error($stmt)],500);
+    }
+
+    if (mysqli_stmt_affected_rows($stmt) === 0) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>"No hay suficientes envases vacíos"],409);
+    }
+
+    if (!record_stock_movement($con, $userId, $nombre, 'llenado', $cantidad) || !mysqli_commit($con)) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>mysqli_error($con)],500);
+    }
+    mysqli_autocommit($con, true);
 
     $stmt = prepare_or_fail($con, 'SELECT * FROM sap_pr00 WHERE pr_ide = ? AND pr_emp = ?');
 

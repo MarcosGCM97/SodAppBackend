@@ -9,11 +9,17 @@ $userId = current_user_id();
 $method = $_SERVER['REQUEST_METHOD'];
 
 if ($method === 'GET') {
+    // pr_cli: containers held by the owner's non-deleted clientes (sum of their balances)
+    $selectProducto = 'SELECT p.*, (SELECT COALESCE(SUM(ce.ce_can), 0) FROM sap_ce00 ce
+            JOIN sap_cl00 c ON c.cl_ide = ce.ce_cli AND c.is_deleted = 0
+            WHERE ce.ce_pro = p.pr_ide AND ce.ce_emp = p.pr_emp) AS pr_cli
+        FROM sap_pr00 p WHERE p.deleted_at IS NULL';
+
     if (isset($_GET['nombre']) && $_GET['nombre'] !== '') {
 
         $nombre = $_GET['nombre'];
 
-        $stmt = prepare_or_fail($con, 'SELECT * FROM sap_pr00 WHERE deleted_at IS NULL AND pr_nom = ? AND pr_emp = ?');
+        $stmt = prepare_or_fail($con, $selectProducto . ' AND p.pr_nom = ? AND p.pr_emp = ?');
 
         mysqli_stmt_bind_param($stmt, 'si', $nombre, $userId);
 
@@ -28,7 +34,7 @@ if ($method === 'GET') {
         send_json(["success" => false, "error" => "Producto no encontrado"], 404);
     } else {
         // $userId is an int from the token; plain query keeps the string-typed JSON of this list
-        $res = mysqli_query($con, 'SELECT * FROM sap_pr00 WHERE deleted_at IS NULL AND pr_emp = ' . intval($userId));
+        $res = mysqli_query($con, $selectProducto . ' AND p.pr_emp = ' . intval($userId));
 
         if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
@@ -75,12 +81,28 @@ if ($method === 'POST') {
 
     mysqli_stmt_bind_param($stmt, 'sdiiii', $nombre, $precio, $cantidad, $userId, $retornable, $vacios);
 
-    if (mysqli_stmt_execute($stmt)) send_json(["success"=>true,"message"=>"Producto creado","id"=>mysqli_insert_id($con)],201);
+    // The product and its "alta" movement are saved together
+    mysqli_autocommit($con, false);
 
-    // concurrent insert of the same name hits the unique key
-    if (mysqli_stmt_errno($stmt) === 1062) send_json(["success"=>false,"error"=>"Ya existe producto"],409);
+    if (!mysqli_stmt_execute($stmt)) {
+        mysqli_rollback($con);
 
-    send_json(["success"=>false,"error"=>mysqli_stmt_error($stmt)],500);
+        // concurrent insert of the same name hits the unique key
+        if (mysqli_stmt_errno($stmt) === 1062) send_json(["success"=>false,"error"=>"Ya existe producto"],409);
+
+        send_json(["success"=>false,"error"=>mysqli_stmt_error($stmt)],500);
+    }
+
+    $productoId = mysqli_insert_id($con);
+
+    if (!record_stock_movement($con, $userId, $nombre, 'alta', intval($cantidad)) || !mysqli_commit($con)) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>mysqli_error($con)],500);
+    }
+    mysqli_autocommit($con, true);
+
+    send_json(["success"=>true,"message"=>"Producto creado","id"=>$productoId],201);
 }
 
 if ($method === 'PUT') {
@@ -101,8 +123,12 @@ if ($method === 'PUT') {
 
     if ($vacios === null) send_json(["success" => false, "error" => "Dato inválido: vacios debe ser un número entero mayor o igual a 0"], 400);
 
-    // Ownership check first: an UPDATE with unchanged values affects 0 rows
-    $check = prepare_or_fail($con, 'SELECT 1 FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ? AND updated_at IS NULL');
+    // The edit and its "ajuste" movement are saved together
+    mysqli_autocommit($con, false);
+
+    // Ownership check first (an UPDATE with unchanged values affects 0 rows); the lock
+    // keeps the previous stock valid until the movement is recorded
+    $check = prepare_or_fail($con, 'SELECT COALESCE(pr_stk, 0) AS pr_stk FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ? AND deleted_at IS NULL FOR UPDATE');
 
     mysqli_stmt_bind_param($check, 'si', $nombre, $userId);
 
@@ -110,7 +136,13 @@ if ($method === 'PUT') {
 
     $resCheck = mysqli_stmt_get_result($check);
 
-    if (!$resCheck || mysqli_num_rows($resCheck) === 0) send_json(["success"=>false,"error"=>"Producto no encontrado"],404);
+    $actual = $resCheck ? mysqli_fetch_assoc($resCheck) : null;
+
+    if (!$actual) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>"Producto no encontrado"],404);
+    }
 
     $sets = 'pr_val = ?, pr_stk = ?';
 
@@ -130,7 +162,7 @@ if ($method === 'PUT') {
         $params[] = $vacios;
     }
 
-    $stmt = prepare_or_fail($con, "UPDATE sap_pr00 SET $sets WHERE pr_nom = ? AND pr_emp = ? AND updated_at IS NULL");
+    $stmt = prepare_or_fail($con, "UPDATE sap_pr00 SET $sets WHERE pr_nom = ? AND pr_emp = ? AND deleted_at IS NULL");
 
     $types .= 'si';
 
@@ -140,13 +172,31 @@ if ($method === 'PUT') {
 
     mysqli_stmt_bind_param($stmt, $types, ...$params);
 
-    if (mysqli_stmt_execute($stmt)) {
-        send_json(["success"=>true,"message"=>"Producto actualizado"]);
-    } else if (mysqli_stmt_errno($stmt) === 1062) {
-        send_json(["success"=>false,"error"=>"Ya existe producto"],409);
-    } else {
+    if (!mysqli_stmt_execute($stmt)) {
+        mysqli_rollback($con);
+
+        if (mysqli_stmt_errno($stmt) === 1062) send_json(["success"=>false,"error"=>"Ya existe producto"],409);
+
         send_json(["success"=>false,"error"=>mysqli_stmt_error($stmt)],500);
     }
+
+    // Only a stock change is a movement: price or container edits record nothing
+    $diferencia = intval($cantidad) - intval($actual['pr_stk']);
+
+    if ($diferencia !== 0 && !record_stock_movement($con, $userId, $nombre, 'ajuste', $diferencia)) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>mysqli_error($con)],500);
+    }
+
+    if (!mysqli_commit($con)) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>"No se pudo confirmar la transacción"],500);
+    }
+    mysqli_autocommit($con, true);
+
+    send_json(["success"=>true,"message"=>"Producto actualizado"]);
 }
 
 if ($method === 'DELETE') {

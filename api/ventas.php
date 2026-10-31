@@ -227,6 +227,8 @@ if ($method === 'POST') {
             send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtInsert)],500);
         }
 
+        $ventaId = mysqli_insert_id($con);
+
         // descontar stock del producto
         mysqli_stmt_bind_param($stmtDecrementStock, 'isi', $cantidad, $nombre, $userId);
 
@@ -234,6 +236,12 @@ if ($method === 'POST') {
             mysqli_rollback($con);
 
             send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtDecrementStock)],500);
+        }
+
+        if (!record_stock_movement($con, $userId, $nombre, 'venta', -$cantidad, $ventaId)) {
+            mysqli_rollback($con);
+
+            send_json(["success"=>false,"error"=>mysqli_error($con)],500);
         }
 
         if ($retornable) {
@@ -320,6 +328,10 @@ if ($method === 'POST') {
 if ($method==="DELETE") {
     $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
 
+    // Newer app versions ask for the debt to be reverted here; older ones revert it
+    // through deudaCliente.php after this call, so reverting it for them would subtract it twice
+    $revertirDeuda = isset($_GET['revertir_deuda']) && $_GET['revertir_deuda'] === '1';
+
     if ($id <= 0) {
         send_json(["success"=>false,"error"=>"ID inválido"],400);
     }
@@ -327,7 +339,7 @@ if ($method==="DELETE") {
     mysqli_autocommit($con, false);
 
     // Lock the line so two concurrent deletes cannot revert its containers twice
-    $stmtFind = prepare_or_fail($con, 'SELECT vt_cli, vt_pro, vt_can, vt_dev FROM sap_vt00 WHERE vt_ide = ? AND vt_emp = ? FOR UPDATE');
+    $stmtFind = prepare_or_fail($con, 'SELECT vt_cli, vt_pro, vt_can, vt_dev, vt_mon FROM sap_vt00 WHERE vt_ide = ? AND vt_emp = ? FOR UPDATE');
 
     mysqli_stmt_bind_param($stmtFind, 'ii', $id, $userId);
 
@@ -343,7 +355,26 @@ if ($method==="DELETE") {
         send_json(["success"=>false,"error"=>"Venta no encontrada"],404);
     }
 
-    // Lines with vt_dev revert their container effect; stock and debt are not reverted (as before)
+    // The sold units go back to stock
+    $stmtRestoreStock = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_stk = COALESCE(pr_stk, 0) + ? WHERE pr_nom = ? AND pr_emp = ?');
+
+    $cantidad = intval($venta['vt_can']);
+
+    mysqli_stmt_bind_param($stmtRestoreStock, 'isi', $cantidad, $venta['vt_pro'], $userId);
+
+    if (!mysqli_stmt_execute($stmtRestoreStock)) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtRestoreStock)],500);
+    }
+
+    if (!record_stock_movement($con, $userId, $venta['vt_pro'], 'venta_eliminada', $cantidad, $id)) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>mysqli_error($con)],500);
+    }
+
+    // Lines with vt_dev also revert their container effect
     if ($venta['vt_dev'] !== null) {
         $devueltos = intval($venta['vt_dev']);
 
@@ -371,6 +402,24 @@ if ($method==="DELETE") {
             mysqli_rollback($con);
 
             send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtBalance)],500);
+        }
+    }
+
+    // The sale amount leaves the debt even below zero: whatever the client already paid
+    // for this sale stays as a credit balance that the next sale consumes
+    if ($revertirDeuda) {
+        $stmtRevertDebt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_deb = COALESCE(cl_deb, 0) - ? WHERE cl_ide = ? AND cl_emp = ?');
+
+        $monto = floatval($venta['vt_mon']);
+
+        $clienteVenta = intval($venta['vt_cli']);
+
+        mysqli_stmt_bind_param($stmtRevertDebt, 'dii', $monto, $clienteVenta, $userId);
+
+        if (!mysqli_stmt_execute($stmtRevertDebt)) {
+            mysqli_rollback($con);
+
+            send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtRevertDebt)],500);
         }
     }
 

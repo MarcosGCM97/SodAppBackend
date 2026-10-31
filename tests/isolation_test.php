@@ -256,6 +256,7 @@ $maxCl = max_id('sap_cl00', 'cl_ide');
 $maxPr = max_id('sap_pr00', 'pr_ide');
 $maxVt = max_id('sap_vt00', 'vt_ide');
 $maxPg = table_exists('sap_pg00') ? max_id('sap_pg00', 'pg_ide') : 0;
+$maxMs = table_exists('sap_ms00') ? max_id('sap_ms00', 'ms_ide') : 0;
 
 $arizaClientes = db_rows('SELECT cl_ide, cl_nom FROM sap_cl00 WHERE cl_emp = ?', 'i', [$arizaId]);
 $arizaClienteIds = ids($arizaClientes, 'cl_ide');
@@ -309,14 +310,17 @@ function table_exists($table) {
 }
 
 function cleanup() {
-    global $maxCl, $maxPr, $maxVt, $maxPg, $addedDeletedAt;
+    global $maxCl, $maxPr, $maxVt, $maxPg, $maxMs, $addedDeletedAt;
     // payments reference clientes (FK): delete them first
     if (table_exists('sap_pg00')) {
         db_exec('DELETE FROM sap_pg00 WHERE pg_ide > ? OR pg_cli > ?', 'ii', [$maxPg, $maxCl]);
     }
-    // container balances reference clientes and productos (FKs): delete them first
+    // container balances and stock movements reference productos (FKs): delete them first
     if (table_exists('sap_ce00')) {
         db_exec('DELETE FROM sap_ce00 WHERE ce_cli > ? OR ce_pro > ?', 'ii', [$maxCl, $maxPr]);
+    }
+    if (table_exists('sap_ms00')) {
+        db_exec('DELETE FROM sap_ms00 WHERE ms_ide > ? OR ms_pro > ?', 'ii', [$maxMs, $maxPr]);
     }
     db_exec('DELETE FROM sap_vt00 WHERE vt_ide > ?', 'i', [$maxVt]);
     db_exec('DELETE FROM sap_pr00 WHERE pr_ide > ?', 'i', [$maxPr]);
@@ -770,6 +774,19 @@ expect_status('Congre PUT vacios of Ariza producto', 404, http('PUT', 'productos
 $row = pr_row($retId);
 check('Congre PUT vacios of Ariza producto changed nothing', $row && (int) $row['pr_ret'] === 1 && (int) $row['pr_vac'] === 3, json_encode($row));
 
+// PUT filters soft-deleted productos, not updated_at: a row with updated_at set stays editable
+db_exec('UPDATE sap_pr00 SET updated_at = CURDATE() WHERE pr_ide = ?', 'i', [$retId]);
+expect_status('Ariza PUT producto with updated_at set', 200, http('PUT', 'productos.php', [
+    'nombre' => $retName, 'precio' => 110, 'cantidad' => 20,
+], null, $tokA));
+check('PUT producto with updated_at set saved the values', (float) pr_row($retId)['pr_val'] === 110.0 && (int) pr_row($retId)['pr_stk'] === 20, json_encode(pr_row($retId)));
+db_exec('UPDATE sap_pr00 SET updated_at = NULL, deleted_at = CURDATE() WHERE pr_ide = ?', 'i', [$retId]);
+expect_status('PUT soft-deleted producto -> 404', 404, http('PUT', 'productos.php', [
+    'nombre' => $retName, 'precio' => 999, 'cantidad' => 99,
+], null, $tokA));
+check('PUT soft-deleted producto changed nothing', (float) pr_row($retId)['pr_val'] === 110.0 && (int) pr_row($retId)['pr_stk'] === 20, json_encode(pr_row($retId)));
+db_exec('UPDATE sap_pr00 SET deleted_at = NULL WHERE pr_ide = ?', 'i', [$retId]);
+
 // A cliente of Ariza for the sales below
 expect_status('Ariza creates cliente for envases', 201, http('POST', 'clientes.php', [], [
     'nombreCl' => $envClName, 'numTelCl' => '351000002', 'direccionCl' => 'Calle test 3',
@@ -861,18 +878,23 @@ check('Congre DELETE Ariza venta with devueltos: nothing changed', envases_state
 $r = http('DELETE', 'ventas.php', ['id' => $returnLineId], null, $tokA);
 expect_status('Ariza DELETE venta line with vt_dev=6', 200, $r);
 check('DELETE venta keeps the same response body', $r[2] === json_encode(['success' => true, 'message' => 'Venta eliminada']), short($r[2]));
-check('DELETE venta reverted pr_vac (11-6=5), stock untouched', (int) pr_row($retId)['pr_vac'] === 5
-    && (int) pr_row($retId)['pr_stk'] === $stockBefore, json_encode(pr_row($retId)));
+check('DELETE venta reverted pr_vac (11-6=5) and restored the sold unit to stock', (int) pr_row($retId)['pr_vac'] === 5
+    && (int) pr_row($retId)['pr_stk'] === $stockBefore + 1, json_encode(pr_row($retId)));
 check('DELETE venta reverted the balance (0 - (1-6) = 5)', ce_can($envClId, $retId) === 5, var_export(ce_can($envClId, $retId), true));
 check('DELETE venta removed the line', db_row('SELECT 1 AS x FROM sap_vt00 WHERE vt_ide = ?', 'i', [$returnLineId]) === null);
 $vts = ventas_of($envClId);
 $plainLineId = isset($vts[1]) ? (int) $vts[1]['vt_ide'] : 0;
+$plainLineCan = isset($vts[1]) ? (int) $vts[1]['vt_can'] : 0;
 $plainBefore = pr_row($plainId);
+$plainBefore['pr_stk'] = (string) ((int) $plainBefore['pr_stk'] + $plainLineCan);
 expect_status('Ariza DELETE venta line with vt_dev NULL', 200, http('DELETE', 'ventas.php', ['id' => $plainLineId], null, $tokA));
-check('DELETE venta with vt_dev NULL: producto and balance unchanged', pr_row($plainId) === $plainBefore
-    && ce_can($envClId, $plainId) === null && ce_can($envClId, $retId) === 5, json_encode(pr_row($plainId)));
+check('DELETE venta with vt_dev NULL: stock restored, containers and balance unchanged', $plainLineCan > 0
+    && pr_row($plainId) == $plainBefore && ce_can($envClId, $plainId) === null && ce_can($envClId, $retId) === 5,
+    json_encode([pr_row($plainId), $plainBefore]));
+$stockAfterDelete = (int) pr_row($retId)['pr_stk'];
 expect_status('DELETE venta already deleted -> 404', 404, http('DELETE', 'ventas.php', ['id' => $returnLineId], null, $tokA));
-check('Second DELETE did not revert twice', (int) pr_row($retId)['pr_vac'] === 5 && ce_can($envClId, $retId) === 5);
+check('Second DELETE did not revert twice', (int) pr_row($retId)['pr_vac'] === 5 && ce_can($envClId, $retId) === 5
+    && (int) pr_row($retId)['pr_stk'] === $stockAfterDelete);
 
 // S5 refill: empties become full units, atomically
 $before = pr_row($retId);
@@ -963,7 +985,159 @@ expect_status('PUT envases of a soft-deleted cliente -> 404', 404, http('PUT', '
 check('PUT envases of a soft-deleted cliente changed nothing', ce_can($envClId, $retId) === 10);
 db_exec('UPDATE sap_cl00 SET is_deleted = 0 WHERE cl_ide = ?', 'i', [$envClId]);
 
-// ---------------------------------------------------------------- 7. payments (formas de pago)
+// GET productos: pr_cli = containers held by the owner's non-deleted clientes (sum of ce_can)
+function productos_by_id($json) {
+    $byId = [];
+    foreach (list_of($json, 'productos') as $p) $byId[(int) $p['pr_ide']] = $p;
+    return $byId;
+}
+list(, $j) = http('GET', 'productos.php', [], null, $tokA);
+$byId = productos_by_id($j);
+check('GET productos returns pr_cli with the client balance (10)', isset($byId[$retId]['pr_cli'])
+    && (int) $byId[$retId]['pr_cli'] === 10, json_encode($byId[$retId] ?? null));
+check('GET productos returns pr_cli 0 for a returnable producto with balance 0', isset($byId[$ret2Id]['pr_cli'])
+    && (int) $byId[$ret2Id]['pr_cli'] === 0, json_encode($byId[$ret2Id] ?? null));
+check('GET productos returns pr_cli 0 for a non-returnable producto', isset($byId[$plainId]['pr_cli'])
+    && (int) $byId[$plainId]['pr_cli'] === 0, json_encode($byId[$plainId] ?? null));
+list(, $j) = http('GET', 'productos.php', ['nombre' => $retName], null, $tokA);
+check('GET producto by nombre returns pr_cli (10)', isset($j['producto']['pr_cli'])
+    && (int) $j['producto']['pr_cli'] === 10, json_encode($j));
+db_exec('UPDATE sap_cl00 SET is_deleted = 1 WHERE cl_ide = ?', 'i', [$envClId]);
+list(, $j) = http('GET', 'productos.php', [], null, $tokA);
+$byId = productos_by_id($j);
+check('GET productos pr_cli ignores soft-deleted clientes', isset($byId[$retId]['pr_cli'])
+    && (int) $byId[$retId]['pr_cli'] === 0, json_encode($byId[$retId] ?? null));
+db_exec('UPDATE sap_cl00 SET is_deleted = 0 WHERE cl_ide = ?', 'i', [$envClId]);
+
+// ---------------------------------------------------------------- 7. stock movement history (historial de stock)
+
+echo "\n# Stock movement history: every stock change is recorded and listed newest first\n";
+
+// [tipo, cantidad, stock, venta] of a producto's movements as the API lists them
+function movimientos_of($productoId, $token) {
+    list($status, $json) = http('GET', 'movimientos.php', ['productoId' => $productoId], null, $token);
+    if ($status !== 200) return null;
+    return array_map(function ($m) {
+        return [$m['ms_tip'], (int) $m['ms_can'], (int) $m['ms_stk'], $m['ms_vta'] === null ? null : (int) $m['ms_vta']];
+    }, list_of($json, 'movimientos'));
+}
+
+function ms_count($productoId) {
+    return (int) db_row('SELECT COUNT(*) AS n FROM sap_ms00 WHERE ms_pro = ?', 'i', [$productoId])['n'];
+}
+
+$histName = MARKER . 'hist_' . $suffix;
+
+// S2 alta: initial stock
+expect_status('Ariza POST producto for history', 201, http('POST', 'productos.php', [], [
+    'nombrePr' => $histName, 'precioUni' => 100, 'stock' => 10, 'retornable' => true, 'vacios' => 4,
+], $tokA));
+$histId = pr_id_by_name($histName);
+check('POST producto recorded alta +10 (stock 10)', movimientos_of($histId, $tokA) === [['alta', 10, 10, null]], json_encode(movimientos_of($histId, $tokA)));
+$row = db_row('SELECT ms_emp, ms_fec FROM sap_ms00 WHERE ms_pro = ?', 'i', [$histId]);
+check('Movement is owned by Ariza and dated', $row && (int) $row['ms_emp'] === $arizaId && $row['ms_fec'] !== null, json_encode($row));
+
+// S2 ajuste: new - previous stock; no row when the stock does not change
+expect_status('Ariza PUT producto stock 10 -> 12', 200, http('PUT', 'productos.php', [
+    'nombre' => $histName, 'precio' => 100, 'cantidad' => 12,
+], null, $tokA));
+expect_status('Ariza PUT producto price only', 200, http('PUT', 'productos.php', [
+    'nombre' => $histName, 'precio' => 120, 'cantidad' => 12,
+], null, $tokA));
+check('PUT recorded ajuste +2 and no row for an unchanged stock', movimientos_of($histId, $tokA) === [
+    ['ajuste', 2, 12, null], ['alta', 10, 10, null],
+], json_encode(movimientos_of($histId, $tokA)));
+expect_status('Ariza PUT producto stock 12 -> 7', 200, http('PUT', 'productos.php', [
+    'nombre' => $histName, 'precio' => 120, 'cantidad' => 7,
+], null, $tokA));
+check('PUT recorded ajuste -5 (stock 7)', movimientos_of($histId, $tokA)[0] === ['ajuste', -5, 7, null], json_encode(movimientos_of($histId, $tokA)));
+
+// S2 venta: one row per sale line, linked to the sale
+expect_status('Ariza POST venta of 3 for history', 201, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $histName, 'cantidad' => 3, 'precio' => 120, 'devueltos' => 1],
+]], $tokA));
+$histVtId = (int) db_row('SELECT MAX(vt_ide) AS id FROM sap_vt00 WHERE vt_pro = ? AND vt_emp = ?', 'si', [$histName, $arizaId])['id'];
+check('POST venta recorded venta -3 (stock 4) linked to the sale', movimientos_of($histId, $tokA)[0] === ['venta', -3, 4, $histVtId], json_encode(movimientos_of($histId, $tokA)));
+
+// Rejected requests record nothing
+$before = ms_count($histId);
+expect_status('POST venta with negative devueltos -> 400 (history)', 400, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $histName, 'cantidad' => 1, 'precio' => 120, 'devueltos' => -1],
+]], $tokA));
+expect_status('llenar more than the empties -> 409 (history)', 409, http('POST', 'envases.php', [], [
+    'accion' => 'llenar', 'producto' => $histName, 'cantidad' => 99,
+], $tokA));
+expect_status('PUT producto of Congre on Ariza producto -> 404 (history)', 404, http('PUT', 'productos.php', [
+    'nombre' => $histName, 'precio' => 1, 'cantidad' => 99,
+], null, $tokC));
+check('Rejected requests recorded no movement', ms_count($histId) === $before, (string) ms_count($histId));
+
+// S2 llenado and venta eliminada
+expect_status('Ariza llenar 2 for history', 200, http('POST', 'envases.php', [], [
+    'accion' => 'llenar', 'producto' => $histName, 'cantidad' => 2,
+], $tokA));
+expect_status('Ariza DELETE venta for history', 200, http('DELETE', 'ventas.php', ['id' => $histVtId], null, $tokA));
+check('History lists every movement newest first', movimientos_of($histId, $tokA) === [
+    ['venta_eliminada', 3, 9, $histVtId],
+    ['llenado', 2, 6, null],
+    ['venta', -3, 4, $histVtId],
+    ['ajuste', -5, 7, null],
+    ['ajuste', 2, 12, null],
+    ['alta', 10, 10, null],
+], json_encode(movimientos_of($histId, $tokA)));
+check('Last movement stock matches pr_stk', (int) pr_row($histId)['pr_stk'] === 9, json_encode(pr_row($histId)));
+list(, $j) = http('GET', 'movimientos.php', ['productoId' => $histId], null, $tokA);
+$first = list_of($j, 'movimientos')[0] ?? [];
+check('GET movimientos returns ms_ide, ms_tip, ms_can, ms_stk, ms_vta, ms_fec',
+    array_keys($first) === ['ms_ide', 'ms_tip', 'ms_can', 'ms_stk', 'ms_vta', 'ms_fec'], json_encode($first));
+
+// S3 access: owned, non-deleted producto only
+expect_status('Congre GET movimientos of Ariza producto -> 404', 404, http('GET', 'movimientos.php', ['productoId' => $histId], null, $tokC));
+expect_status('GET movimientos of an unknown producto -> 404', 404, http('GET', 'movimientos.php', ['productoId' => 999999], null, $tokA));
+expect_status('GET movimientos without productoId -> 400', 400, http('GET', 'movimientos.php', [], null, $tokA));
+expect_status('GET movimientos without token -> 401', 401, http('GET', 'movimientos.php', ['productoId' => $histId]));
+db_exec('UPDATE sap_pr00 SET deleted_at = CURDATE() WHERE pr_ide = ?', 'i', [$histId]);
+expect_status('GET movimientos of a soft-deleted producto -> 404', 404, http('GET', 'movimientos.php', ['productoId' => $histId], null, $tokA));
+db_exec('UPDATE sap_pr00 SET deleted_at = NULL WHERE pr_ide = ?', 'i', [$histId]);
+
+// Deleting a sale reverts its amount from the debt, even below zero (credit balance)
+function deuda_of($clienteId) {
+    return (int) db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$clienteId])['cl_deb'];
+}
+function last_venta_of($name, $userId) {
+    return (int) db_row('SELECT MAX(vt_ide) AS id FROM sap_vt00 WHERE vt_pro = ? AND vt_emp = ?', 'si', [$name, $userId])['id'];
+}
+$debtBefore = deuda_of($envClId);
+db_exec('UPDATE sap_cl00 SET cl_deb = 0 WHERE cl_ide = ?', 'i', [$envClId]);
+expect_status('Ariza POST venta of 1000 for debt revert', 201, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $histName, 'cantidad' => 2, 'precio' => 500],
+]], $tokA));
+$debtVtId = last_venta_of($histName, $arizaId);
+expect_status('Ariza pays 700 of the 1000', 200, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 700], null, $tokA));
+check('Debt after paying 700 of 1000 is 300', deuda_of($envClId) === 300, (string) deuda_of($envClId));
+
+expect_status('Congre DELETE Ariza venta with revertir_deuda -> 404', 404, http('DELETE', 'ventas.php', ['id' => $debtVtId, 'revertir_deuda' => 1], null, $tokC));
+check('Rejected DELETE left the debt unchanged', deuda_of($envClId) === 300, (string) deuda_of($envClId));
+
+expect_status('Ariza DELETE paid venta with revertir_deuda', 200, http('DELETE', 'ventas.php', ['id' => $debtVtId, 'revertir_deuda' => 1], null, $tokA));
+check('Deleting a partly paid venta leaves a credit balance of -700', deuda_of($envClId) === -700, (string) deuda_of($envClId));
+list(, $j) = http('GET', 'deudaCliente.php', ['id' => $envClId], null, $tokA);
+check('GET deudaCliente returns the credit balance', isset($j['deudor']['cl_deb']) && (int) $j['deudor']['cl_deb'] === -700, json_encode($j));
+
+expect_status('Ariza POST venta of 500 consumes the credit', 201, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $histName, 'cantidad' => 1, 'precio' => 500],
+]], $tokA));
+check('Next venta consumes the credit balance (-200)', deuda_of($envClId) === -200, (string) deuda_of($envClId));
+
+// Older app versions revert the debt themselves after the DELETE
+expect_status('Ariza DELETE venta without revertir_deuda', 200, http('DELETE', 'ventas.php', ['id' => last_venta_of($histName, $arizaId)], null, $tokA));
+check('DELETE without revertir_deuda leaves the debt unchanged', deuda_of($envClId) === -200, (string) deuda_of($envClId));
+db_exec('UPDATE sap_cl00 SET cl_deb = ? WHERE cl_ide = ?', 'ii', [$debtBefore, $envClId]);
+
+// ---------------------------------------------------------------- 8. payments (formas de pago)
+
+// Earlier sections pay this cliente's debt too (each PUT deuda stores a payment): start from none
+db_exec('DELETE FROM sap_pg00 WHERE pg_cli = ? AND pg_ide > ?', 'ii', [$envClId, $maxPg]);
 
 function payments_of($clienteId) {
     $rows = db_rows('SELECT pg_cli, pg_mon, pg_fp, pg_emp FROM sap_pg00 WHERE pg_cli = ? AND pg_ide > ? ORDER BY pg_ide',
