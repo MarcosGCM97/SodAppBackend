@@ -108,7 +108,7 @@ if ($method === 'PUT') {
     if ($vacios === null) send_json(["success" => false, "error" => "Dato inválido: vacios debe ser un número entero mayor o igual a 0"], 400);
 
     // Ownership check first: an UPDATE with unchanged values affects 0 rows
-    $check = prepare_or_fail($con, 'SELECT 1 FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ? AND updated_at IS NULL');
+    $check = prepare_or_fail($con, 'SELECT 1 FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ? AND deleted_at IS NULL');
 
     mysqli_stmt_bind_param($check, 'si', $nombre, $userId);
 
@@ -136,7 +136,7 @@ if ($method === 'PUT') {
         $params[] = $vacios;
     }
 
-    $stmt = prepare_or_fail($con, "UPDATE sap_pr00 SET $sets WHERE pr_nom = ? AND pr_emp = ? AND updated_at IS NULL");
+    $stmt = prepare_or_fail($con, "UPDATE sap_pr00 SET $sets WHERE pr_nom = ? AND pr_emp = ? AND deleted_at IS NULL");
 
     $types .= 'si';
 
