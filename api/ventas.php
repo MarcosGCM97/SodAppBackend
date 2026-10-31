@@ -227,6 +227,8 @@ if ($method === 'POST') {
             send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtInsert)],500);
         }
 
+        $ventaId = mysqli_insert_id($con);
+
         // descontar stock del producto
         mysqli_stmt_bind_param($stmtDecrementStock, 'isi', $cantidad, $nombre, $userId);
 
@@ -234,6 +236,12 @@ if ($method === 'POST') {
             mysqli_rollback($con);
 
             send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtDecrementStock)],500);
+        }
+
+        if (!record_stock_movement($con, $userId, $nombre, 'venta', -$cantidad, $ventaId)) {
+            mysqli_rollback($con);
+
+            send_json(["success"=>false,"error"=>mysqli_error($con)],500);
         }
 
         if ($retornable) {
@@ -355,6 +363,12 @@ if ($method==="DELETE") {
         mysqli_rollback($con);
 
         send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtRestoreStock)],500);
+    }
+
+    if (!record_stock_movement($con, $userId, $venta['vt_pro'], 'venta_eliminada', $cantidad, $id)) {
+        mysqli_rollback($con);
+
+        send_json(["success"=>false,"error"=>mysqli_error($con)],500);
     }
 
     // Lines with vt_dev also revert their container effect

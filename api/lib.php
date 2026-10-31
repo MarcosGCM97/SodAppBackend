@@ -77,6 +77,19 @@ function parse_non_negative_int($value) {
     return null;
 }
 
+// Records a stock movement of the owner's product in sap_ms00 (historial de stock).
+// Call it right after changing pr_stk, inside the same transaction: ms_stk takes the
+// stock that the change left. $tipo: venta, venta_eliminada, llenado, ajuste, alta.
+// Returns false when the insert fails, so the caller can roll back.
+function record_stock_movement($con, $userId, $nombre, $tipo, $cantidad, $ventaId = null) {
+    $stmt = prepare_or_fail($con, 'INSERT INTO sap_ms00 (ms_pro, ms_emp, ms_tip, ms_can, ms_stk, ms_vta, ms_fec)
+        SELECT pr_ide, pr_emp, ?, ?, COALESCE(pr_stk, 0), ?, NOW() FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ?');
+
+    mysqli_stmt_bind_param($stmt, 'siisi', $tipo, $cantidad, $ventaId, $nombre, $userId);
+
+    return mysqli_stmt_execute($stmt);
+}
+
 // Boolean flag as 0/1 from JSON (true/false, 0/1) or a query param ("0"/"1"); null when invalid
 function parse_flag($value) {
     if (is_bool($value)) return $value ? 1 : 0;
