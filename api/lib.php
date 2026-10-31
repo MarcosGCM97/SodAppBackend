@@ -13,6 +13,9 @@ $db = new Database();
 
 $con = $db->connect();
 
+// sap_fp00 row stored for payments sent without a method (old app versions)
+const FORMA_PAGO_SIN_ESPECIFICAR = 1;
+
 function allow_cors() {
 
     header('Access-Control-Allow-Origin: *');

@@ -49,6 +49,22 @@ if ($method === "PUT") {
         send_json(["success" => false, "error" => "La deuda debe ser mayor a 0"], 400);
     }
 
+    // Old app versions send no payment method: their payments are stored as "Sin especificar"
+    $formaPago = FORMA_PAGO_SIN_ESPECIFICAR;
+    if (isset($data['formaPago'])) {
+        $formaPagoRaw = is_array($data['formaPago']) ? '' : trim((string) $data['formaPago']);
+        $formaPago = ctype_digit($formaPagoRaw) ? intval($formaPagoRaw) : 0;
+
+        // Only selectable methods are accepted from clients
+        $checkForma = prepare_or_fail($con, 'SELECT 1 FROM sap_fp00 WHERE fp_ide = ? AND fp_sel = 1');
+        mysqli_stmt_bind_param($checkForma, 'i', $formaPago);
+        mysqli_stmt_execute($checkForma);
+        $resForma = mysqli_stmt_get_result($checkForma);
+        if (!$resForma || mysqli_num_rows($resForma) === 0) {
+            send_json(["success" => false, "error" => "Forma de pago inválida"], 400);
+        }
+    }
+
     // The cliente must belong to the token user
     $check = prepare_or_fail($con, 'SELECT 1 FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ? AND is_deleted = 0');
     mysqli_stmt_bind_param($check, 'ii', $id, $userId);
@@ -67,23 +83,38 @@ if ($method === "PUT") {
           AND cl_deb > 0
     ";
 
+    // The balance and the payment record change together or not at all
+    mysqli_autocommit($con, false);
+
     $stmt = prepare_or_fail($con, $queryUpdateDeuda);
 
     mysqli_stmt_bind_param($stmt, 'diid', $totalDeuda, $id, $userId, $totalDeuda);
 
     if (mysqli_stmt_execute($stmt)) {
-        if ($stmt->affected_rows > 0) {
+        if ($stmt->affected_rows === 0) {
+            mysqli_rollback($con);
+            // The cliente exists and is owned by the user, so no affected row means the amount exceeds the debt
             send_json([
-                "success" => true,
-                "message" => "Deuda actualizada correctamente"
-            ]);
+                "success" => false,
+                "error" => "El monto supera la deuda actual del cliente"
+            ], 409);
         }
-        // The cliente exists and is owned by the user, so no affected row means the amount exceeds the debt
+
+        $stmtPago = prepare_or_fail($con, 'INSERT INTO sap_pg00 (pg_cli, pg_mon, pg_fp, pg_emp) VALUES (?, ?, ?, ?)');
+        mysqli_stmt_bind_param($stmtPago, 'idii', $id, $totalDeuda, $formaPago, $userId);
+
+        if (!mysqli_stmt_execute($stmtPago) || !mysqli_commit($con)) {
+            mysqli_rollback($con);
+            send_json(["success" => false, "error" => "No se pudo registrar el pago"], 500);
+        }
+        mysqli_autocommit($con, true);
+
         send_json([
-            "success" => false,
-            "error" => "El monto supera la deuda actual del cliente"
-        ], 409);
+            "success" => true,
+            "message" => "Deuda actualizada correctamente"
+        ]);
     }
+    mysqli_rollback($con);
 
     send_json([
         "success" => false,

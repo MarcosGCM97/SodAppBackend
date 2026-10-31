@@ -255,6 +255,7 @@ if (!column_exists('sap_pr00', 'deleted_at')) {
 $maxCl = max_id('sap_cl00', 'cl_ide');
 $maxPr = max_id('sap_pr00', 'pr_ide');
 $maxVt = max_id('sap_vt00', 'vt_ide');
+$maxPg = table_exists('sap_pg00') ? max_id('sap_pg00', 'pg_ide') : 0;
 $maxMs = table_exists('sap_ms00') ? max_id('sap_ms00', 'ms_ide') : 0;
 
 $arizaClientes = db_rows('SELECT cl_ide, cl_nom FROM sap_cl00 WHERE cl_emp = ?', 'i', [$arizaId]);
@@ -309,7 +310,11 @@ function table_exists($table) {
 }
 
 function cleanup() {
-    global $maxCl, $maxPr, $maxVt, $maxMs, $addedDeletedAt;
+    global $maxCl, $maxPr, $maxVt, $maxPg, $maxMs, $addedDeletedAt;
+    // payments reference clientes (FK): delete them first
+    if (table_exists('sap_pg00')) {
+        db_exec('DELETE FROM sap_pg00 WHERE pg_ide > ? OR pg_cli > ?', 'ii', [$maxPg, $maxCl]);
+    }
     // container balances and stock movements reference productos (FKs): delete them first
     if (table_exists('sap_ce00')) {
         db_exec('DELETE FROM sap_ce00 WHERE ce_cli > ? OR ce_pro > ?', 'ii', [$maxCl, $maxPr]);
@@ -1128,6 +1133,107 @@ check('Next venta consumes the credit balance (-200)', deuda_of($envClId) === -2
 expect_status('Ariza DELETE venta without revertir_deuda', 200, http('DELETE', 'ventas.php', ['id' => last_venta_of($histName, $arizaId)], null, $tokA));
 check('DELETE without revertir_deuda leaves the debt unchanged', deuda_of($envClId) === -200, (string) deuda_of($envClId));
 db_exec('UPDATE sap_cl00 SET cl_deb = ? WHERE cl_ide = ?', 'ii', [$debtBefore, $envClId]);
+
+// ---------------------------------------------------------------- 8. payments (formas de pago)
+
+// Earlier sections pay this cliente's debt too (each PUT deuda stores a payment): start from none
+db_exec('DELETE FROM sap_pg00 WHERE pg_cli = ? AND pg_ide > ?', 'ii', [$envClId, $maxPg]);
+
+function payments_of($clienteId) {
+    $rows = db_rows('SELECT pg_cli, pg_mon, pg_fp, pg_emp FROM sap_pg00 WHERE pg_cli = ? AND pg_ide > ? ORDER BY pg_ide',
+        'ii', [$clienteId, $GLOBALS['maxPg']]);
+    return array_map(function ($p) {
+        return ['pg_cli' => (int) $p['pg_cli'], 'pg_mon' => $p['pg_mon'], 'pg_fp' => (int) $p['pg_fp'], 'pg_emp' => (int) $p['pg_emp']];
+    }, $rows);
+}
+function set_debt($clienteId, $deuda) {
+    db_exec('UPDATE sap_cl00 SET cl_deb = ? WHERE cl_ide = ?', 'ii', [$deuda, $clienteId]);
+}
+function debt_of($clienteId) {
+    return (int) db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$clienteId])['cl_deb'];
+}
+// Congre's cliente of section 3 was deleted in section 5: create a fresh one
+$pagoClName = MARKER . 'pagocli_' . substr(md5(uniqid('', true)), 0, 6);
+expect_status('Congre creates cliente for payments', 201, http('POST', 'clientes.php', [], [
+    'nombreCl' => $pagoClName, 'numTelCl' => '351000001', 'direccionCl' => 'Calle test 2',
+], $tokC));
+$pagoClC = (int) (db_row('SELECT cl_ide FROM sap_cl00 WHERE cl_nom = ?', 's', [$pagoClName])['cl_ide'] ?? 0);
+$payDebtA = debt_of($envClId);
+$payDebtC = debt_of($pagoClC);
+
+// S2 selectable methods
+list($st, $j) = http('GET', 'pagos.php', ['formas' => 1], null, $tokA);
+check('GET formas lists Efectivo and Transferencia only', $st === 200
+    && array_column(list_of($j, 'formas'), 'fp_nom') === ['Efectivo', 'Transferencia'], json_encode($j));
+check('GET formas returns fp_ide and fp_nom', array_keys(list_of($j, 'formas')[0] ?? []) === ['fp_ide', 'fp_nom'], json_encode($j));
+$efectivo = 2;
+$transferencia = 3;
+
+// S4 an accepted payment is stored with its method in the same transaction
+set_debt($envClId, 1000);
+list($st, , $raw) = http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => '300.5', 'formaPago' => $efectivo], null, $tokA);
+check('PUT deuda with formaPago keeps the same response body',
+    $st === 200 && json_decode($raw, true) === ['success' => true, 'message' => 'Deuda actualizada correctamente'], "$st $raw");
+check('PUT deuda with formaPago stored the payment',
+    payments_of($envClId) === [['pg_cli' => $envClId, 'pg_mon' => '300.50', 'pg_fp' => $efectivo, 'pg_emp' => $arizaId]],
+    json_encode(payments_of($envClId)));
+check('PUT deuda with formaPago lowered the balance', debt_of($envClId) === 700, (string) debt_of($envClId));
+
+// S4 old app versions send no method: stored as Sin especificar
+expect_status('PUT deuda without formaPago (old app)', 200, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 100], null, $tokA));
+check('PUT deuda without formaPago stored Sin especificar', (payments_of($envClId)[1]['pg_fp'] ?? null) === 1, json_encode(payments_of($envClId)));
+
+// S4 rejected payments store nothing and leave the balance unchanged
+$before = count(payments_of($envClId));
+expect_status('PUT deuda with an unknown formaPago -> 400', 400, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 10, 'formaPago' => 999], null, $tokA));
+expect_status('PUT deuda with the non-selectable Sin especificar -> 400', 400, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 10, 'formaPago' => 1], null, $tokA));
+expect_status('PUT deuda with a non-numeric formaPago -> 400', 400, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 10, 'formaPago' => 'x'], null, $tokA));
+expect_status('PUT deuda larger than the balance with formaPago -> 409', 409, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 5000, 'formaPago' => $efectivo], null, $tokA));
+expect_status('Congre PUT deuda of Ariza cliente with formaPago -> 404', 404, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 10, 'formaPago' => $efectivo], null, $tokC));
+check('Rejected payments stored nothing', count(payments_of($envClId)) === $before, json_encode(payments_of($envClId)));
+check('Rejected payments left the balance unchanged', debt_of($envClId) === 600, (string) debt_of($envClId));
+
+// S5 payment history per client, newest first
+expect_status('PUT deuda with Transferencia', 200, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 50, 'formaPago' => $transferencia], null, $tokA));
+list($st, $j) = http('GET', 'pagos.php', ['clienteId' => $envClId], null, $tokA);
+$hist = list_of($j, 'pagos');
+check('GET pagos by cliente lists every payment newest first',
+    $st === 200 && array_map(function ($p) { return [$p['pg_mon'], $p['fp_nom']]; }, $hist)
+        === [['50.00', 'Transferencia'], ['100.00', 'Sin especificar'], ['300.50', 'Efectivo']], json_encode($j));
+check('GET pagos by cliente returns pg_ide, pg_mon, fp_nom, pg_fec', array_keys($hist[0] ?? []) === ['pg_ide', 'pg_mon', 'fp_nom', 'pg_fec'], json_encode($hist[0] ?? []));
+
+// S6 isolation
+expect_status('Congre GET pagos of Ariza cliente -> 404', 404, http('GET', 'pagos.php', ['clienteId' => $envClId], null, $tokC));
+expect_status('GET pagos of an unknown cliente -> 404', 404, http('GET', 'pagos.php', ['clienteId' => 999999], null, $tokA));
+expect_status('GET pagos without token -> 401', 401, http('GET', 'pagos.php', ['clienteId' => $envClId]));
+expect_status('GET pagos without parameters -> 400', 400, http('GET', 'pagos.php', [], null, $tokA));
+expect_status('POST pagos -> 405', 405, http('POST', 'pagos.php', [], ['x' => 1], $tokA));
+
+// S5 monthly totals per method, only the owner's payments
+set_debt($pagoClC, 100);
+expect_status('Congre PUT deuda with Efectivo', 200, http('PUT', 'deudaCliente.php', ['id' => $pagoClC, 'deuda' => 40, 'formaPago' => $efectivo], null, $tokC));
+$mesActual = (int) date('n');
+$anoActual = (int) date('Y');
+$totales = function ($token) use ($mesActual, $anoActual) {
+    list($st, $j) = http('GET', 'pagos.php', ['mes' => $mesActual, 'ano' => $anoActual], null, $token);
+    $out = [];
+    foreach (list_of($j, 'totales') as $t) $out[$t['fp_nom']] = $t['total'];
+    return [$st, $out];
+};
+// Ariza may have earlier payments this month: compare against the DB, not fixed numbers
+$expectedA = [];
+foreach (db_rows('SELECT fp.fp_nom, SUM(pg.pg_mon) AS total FROM sap_pg00 pg JOIN sap_fp00 fp ON fp.fp_ide = pg.pg_fp
+        WHERE pg.pg_emp = ? AND YEAR(pg.pg_fec) = ? AND MONTH(pg.pg_fec) = ? GROUP BY fp.fp_ide, fp.fp_nom ORDER BY fp.fp_ide',
+        'iii', [$arizaId, $anoActual, $mesActual]) as $t) $expectedA[$t['fp_nom']] = $t['total'];
+list($st, $gotA) = $totales($tokA);
+check('GET pagos monthly totals per method for Ariza', $st === 200 && $gotA && $gotA === $expectedA, json_encode($gotA) . ' vs ' . json_encode($expectedA));
+list($st, $gotC) = $totales($tokC);
+check('Congre monthly totals include only his payments', $st === 200 && ($gotC['Efectivo'] ?? null) === '40.00'
+    && !isset($gotC['Transferencia']), json_encode($gotC));
+expect_status('GET pagos with an invalid mes -> 400', 400, http('GET', 'pagos.php', ['mes' => 13], null, $tokA));
+expect_status('GET pagos with an invalid ano -> 400', 400, http('GET', 'pagos.php', ['mes' => 1, 'ano' => '20x6'], null, $tokA));
+set_debt($envClId, $payDebtA);
+set_debt($pagoClC, $payDebtC);
 
 // ---------------------------------------------------------------- summary
 
