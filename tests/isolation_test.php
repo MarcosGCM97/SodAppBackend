@@ -255,6 +255,7 @@ if (!column_exists('sap_pr00', 'deleted_at')) {
 $maxCl = max_id('sap_cl00', 'cl_ide');
 $maxPr = max_id('sap_pr00', 'pr_ide');
 $maxVt = max_id('sap_vt00', 'vt_ide');
+$maxMs = table_exists('sap_ms00') ? max_id('sap_ms00', 'ms_ide') : 0;
 
 $arizaClientes = db_rows('SELECT cl_ide, cl_nom FROM sap_cl00 WHERE cl_emp = ?', 'i', [$arizaId]);
 $arizaClienteIds = ids($arizaClientes, 'cl_ide');
@@ -308,10 +309,13 @@ function table_exists($table) {
 }
 
 function cleanup() {
-    global $maxCl, $maxPr, $maxVt, $addedDeletedAt;
-    // container balances reference clientes and productos (FKs): delete them first
+    global $maxCl, $maxPr, $maxVt, $maxMs, $addedDeletedAt;
+    // container balances and stock movements reference productos (FKs): delete them first
     if (table_exists('sap_ce00')) {
         db_exec('DELETE FROM sap_ce00 WHERE ce_cli > ? OR ce_pro > ?', 'ii', [$maxCl, $maxPr]);
+    }
+    if (table_exists('sap_ms00')) {
+        db_exec('DELETE FROM sap_ms00 WHERE ms_ide > ? OR ms_pro > ?', 'ii', [$maxMs, $maxPr]);
     }
     db_exec('DELETE FROM sap_vt00 WHERE vt_ide > ?', 'i', [$maxVt]);
     db_exec('DELETE FROM sap_pr00 WHERE pr_ide > ?', 'i', [$maxPr]);
@@ -999,6 +1003,97 @@ $byId = productos_by_id($j);
 check('GET productos pr_cli ignores soft-deleted clientes', isset($byId[$retId]['pr_cli'])
     && (int) $byId[$retId]['pr_cli'] === 0, json_encode($byId[$retId] ?? null));
 db_exec('UPDATE sap_cl00 SET is_deleted = 0 WHERE cl_ide = ?', 'i', [$envClId]);
+
+// ---------------------------------------------------------------- 7. stock movement history (historial de stock)
+
+echo "\n# Stock movement history: every stock change is recorded and listed newest first\n";
+
+// [tipo, cantidad, stock, venta] of a producto's movements as the API lists them
+function movimientos_of($productoId, $token) {
+    list($status, $json) = http('GET', 'movimientos.php', ['productoId' => $productoId], null, $token);
+    if ($status !== 200) return null;
+    return array_map(function ($m) {
+        return [$m['ms_tip'], (int) $m['ms_can'], (int) $m['ms_stk'], $m['ms_vta'] === null ? null : (int) $m['ms_vta']];
+    }, list_of($json, 'movimientos'));
+}
+
+function ms_count($productoId) {
+    return (int) db_row('SELECT COUNT(*) AS n FROM sap_ms00 WHERE ms_pro = ?', 'i', [$productoId])['n'];
+}
+
+$histName = MARKER . 'hist_' . $suffix;
+
+// S2 alta: initial stock
+expect_status('Ariza POST producto for history', 201, http('POST', 'productos.php', [], [
+    'nombrePr' => $histName, 'precioUni' => 100, 'stock' => 10, 'retornable' => true, 'vacios' => 4,
+], $tokA));
+$histId = pr_id_by_name($histName);
+check('POST producto recorded alta +10 (stock 10)', movimientos_of($histId, $tokA) === [['alta', 10, 10, null]], json_encode(movimientos_of($histId, $tokA)));
+$row = db_row('SELECT ms_emp, ms_fec FROM sap_ms00 WHERE ms_pro = ?', 'i', [$histId]);
+check('Movement is owned by Ariza and dated', $row && (int) $row['ms_emp'] === $arizaId && $row['ms_fec'] !== null, json_encode($row));
+
+// S2 ajuste: new - previous stock; no row when the stock does not change
+expect_status('Ariza PUT producto stock 10 -> 12', 200, http('PUT', 'productos.php', [
+    'nombre' => $histName, 'precio' => 100, 'cantidad' => 12,
+], null, $tokA));
+expect_status('Ariza PUT producto price only', 200, http('PUT', 'productos.php', [
+    'nombre' => $histName, 'precio' => 120, 'cantidad' => 12,
+], null, $tokA));
+check('PUT recorded ajuste +2 and no row for an unchanged stock', movimientos_of($histId, $tokA) === [
+    ['ajuste', 2, 12, null], ['alta', 10, 10, null],
+], json_encode(movimientos_of($histId, $tokA)));
+expect_status('Ariza PUT producto stock 12 -> 7', 200, http('PUT', 'productos.php', [
+    'nombre' => $histName, 'precio' => 120, 'cantidad' => 7,
+], null, $tokA));
+check('PUT recorded ajuste -5 (stock 7)', movimientos_of($histId, $tokA)[0] === ['ajuste', -5, 7, null], json_encode(movimientos_of($histId, $tokA)));
+
+// S2 venta: one row per sale line, linked to the sale
+expect_status('Ariza POST venta of 3 for history', 201, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $histName, 'cantidad' => 3, 'precio' => 120, 'devueltos' => 1],
+]], $tokA));
+$histVtId = (int) db_row('SELECT MAX(vt_ide) AS id FROM sap_vt00 WHERE vt_pro = ? AND vt_emp = ?', 'si', [$histName, $arizaId])['id'];
+check('POST venta recorded venta -3 (stock 4) linked to the sale', movimientos_of($histId, $tokA)[0] === ['venta', -3, 4, $histVtId], json_encode(movimientos_of($histId, $tokA)));
+
+// Rejected requests record nothing
+$before = ms_count($histId);
+expect_status('POST venta with negative devueltos -> 400 (history)', 400, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $histName, 'cantidad' => 1, 'precio' => 120, 'devueltos' => -1],
+]], $tokA));
+expect_status('llenar more than the empties -> 409 (history)', 409, http('POST', 'envases.php', [], [
+    'accion' => 'llenar', 'producto' => $histName, 'cantidad' => 99,
+], $tokA));
+expect_status('PUT producto of Congre on Ariza producto -> 404 (history)', 404, http('PUT', 'productos.php', [
+    'nombre' => $histName, 'precio' => 1, 'cantidad' => 99,
+], null, $tokC));
+check('Rejected requests recorded no movement', ms_count($histId) === $before, (string) ms_count($histId));
+
+// S2 llenado and venta eliminada
+expect_status('Ariza llenar 2 for history', 200, http('POST', 'envases.php', [], [
+    'accion' => 'llenar', 'producto' => $histName, 'cantidad' => 2,
+], $tokA));
+expect_status('Ariza DELETE venta for history', 200, http('DELETE', 'ventas.php', ['id' => $histVtId], null, $tokA));
+check('History lists every movement newest first', movimientos_of($histId, $tokA) === [
+    ['venta_eliminada', 3, 9, $histVtId],
+    ['llenado', 2, 6, null],
+    ['venta', -3, 4, $histVtId],
+    ['ajuste', -5, 7, null],
+    ['ajuste', 2, 12, null],
+    ['alta', 10, 10, null],
+], json_encode(movimientos_of($histId, $tokA)));
+check('Last movement stock matches pr_stk', (int) pr_row($histId)['pr_stk'] === 9, json_encode(pr_row($histId)));
+list(, $j) = http('GET', 'movimientos.php', ['productoId' => $histId], null, $tokA);
+$first = list_of($j, 'movimientos')[0] ?? [];
+check('GET movimientos returns ms_ide, ms_tip, ms_can, ms_stk, ms_vta, ms_fec',
+    array_keys($first) === ['ms_ide', 'ms_tip', 'ms_can', 'ms_stk', 'ms_vta', 'ms_fec'], json_encode($first));
+
+// S3 access: owned, non-deleted producto only
+expect_status('Congre GET movimientos of Ariza producto -> 404', 404, http('GET', 'movimientos.php', ['productoId' => $histId], null, $tokC));
+expect_status('GET movimientos of an unknown producto -> 404', 404, http('GET', 'movimientos.php', ['productoId' => 999999], null, $tokA));
+expect_status('GET movimientos without productoId -> 400', 400, http('GET', 'movimientos.php', [], null, $tokA));
+expect_status('GET movimientos without token -> 401', 401, http('GET', 'movimientos.php', ['productoId' => $histId]));
+db_exec('UPDATE sap_pr00 SET deleted_at = CURDATE() WHERE pr_ide = ?', 'i', [$histId]);
+expect_status('GET movimientos of a soft-deleted producto -> 404', 404, http('GET', 'movimientos.php', ['productoId' => $histId], null, $tokA));
+db_exec('UPDATE sap_pr00 SET deleted_at = NULL WHERE pr_ide = ?', 'i', [$histId]);
 
 // ---------------------------------------------------------------- summary
 
