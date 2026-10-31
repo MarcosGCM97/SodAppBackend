@@ -9,11 +9,17 @@ $userId = current_user_id();
 $method = $_SERVER['REQUEST_METHOD'];
 
 if ($method === 'GET') {
+    // pr_cli: containers held by the owner's non-deleted clientes (sum of their balances)
+    $selectProducto = 'SELECT p.*, (SELECT COALESCE(SUM(ce.ce_can), 0) FROM sap_ce00 ce
+            JOIN sap_cl00 c ON c.cl_ide = ce.ce_cli AND c.is_deleted = 0
+            WHERE ce.ce_pro = p.pr_ide AND ce.ce_emp = p.pr_emp) AS pr_cli
+        FROM sap_pr00 p WHERE p.deleted_at IS NULL';
+
     if (isset($_GET['nombre']) && $_GET['nombre'] !== '') {
 
         $nombre = $_GET['nombre'];
 
-        $stmt = prepare_or_fail($con, 'SELECT * FROM sap_pr00 WHERE deleted_at IS NULL AND pr_nom = ? AND pr_emp = ?');
+        $stmt = prepare_or_fail($con, $selectProducto . ' AND p.pr_nom = ? AND p.pr_emp = ?');
 
         mysqli_stmt_bind_param($stmt, 'si', $nombre, $userId);
 
@@ -28,7 +34,7 @@ if ($method === 'GET') {
         send_json(["success" => false, "error" => "Producto no encontrado"], 404);
     } else {
         // $userId is an int from the token; plain query keeps the string-typed JSON of this list
-        $res = mysqli_query($con, 'SELECT * FROM sap_pr00 WHERE deleted_at IS NULL AND pr_emp = ' . intval($userId));
+        $res = mysqli_query($con, $selectProducto . ' AND p.pr_emp = ' . intval($userId));
 
         if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
