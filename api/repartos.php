@@ -21,6 +21,9 @@ allow_cors();
 //   guardar_lineas    {"paradaId","lineas":[{"productoId","cantidad","precio"?}]}: replaces the
 //                     planned lines of a pendiente stop; precio defaults to pr_val.
 //   ordenar           {"repartoId","paradas":[rs_ide, ...]}: every stop, in the new order.
+//   entregar          {"paradaId","lineas"?:[{"productoId","cantidad","devueltos"?,"precio"?}]}: registers the
+//                     delivered quantities as sales (registrar_venta_lineas) and marks it entregada.
+//   no_entregar       {"paradaId"}: pendiente -> no_entregada; reabrir: no_entregada -> pendiente.
 
 // Every method requires a valid token; the owner always comes from it
 $userId = current_user_id();
@@ -59,7 +62,7 @@ function reparto_del_usuario($con, $userId, $repartoId) {
 
 // Stop of a dated reparto of the owner, locked for the rest of the transaction, or null
 function parada_del_usuario($con, $userId, $paradaId) {
-    $stmt = prepare_or_fail($con, 'SELECT s.rs_ide, s.rs_rp, s.rs_est FROM sap_rs00 s
+    $stmt = prepare_or_fail($con, 'SELECT s.rs_ide, s.rs_rp, s.rs_cli, s.rs_est FROM sap_rs00 s
         JOIN sap_rp00 r ON r.rp_ide = s.rs_rp
         WHERE s.rs_ide = ? AND r.rp_emp = ? AND r.rp_fec IS NOT NULL FOR UPDATE');
     mysqli_stmt_bind_param($stmt, 'ii', $paradaId, $userId);
@@ -257,12 +260,121 @@ if ($method === 'POST') {
         send_json(["success" => true, "paradaId" => $paradaId], 201);
     }
 
-    if ($accion === 'quitar_parada' || $accion === 'guardar_lineas') {
+    if (in_array($accion, ['quitar_parada', 'guardar_lineas', 'entregar', 'no_entregar', 'reabrir'], true)) {
+        // The stop row stays locked until commit, so two deliveries of one stop run one after the other
         $paradaId = isset($data['paradaId']) ? parse_non_negative_int($data['paradaId']) : null;
         $parada = $paradaId ? parada_del_usuario($con, $userId, $paradaId) : null;
         if (!$parada) fallar($con, 404, "Parada no encontrada");
 
-        if ($parada['rs_est'] !== 'pendiente') fallar($con, 409, "Solo se pueden modificar paradas pendientes");
+        // entregada is final; only no_entregada goes back to pendiente
+        if ($accion === 'reabrir') {
+            if ($parada['rs_est'] !== 'no_entregada') fallar($con, 409, "Solo se pueden reabrir paradas no entregadas");
+        } else if ($parada['rs_est'] !== 'pendiente') {
+            fallar($con, 409, "Solo se pueden modificar paradas pendientes");
+        }
+    }
+
+    if ($accion === 'no_entregar' || $accion === 'reabrir') {
+        // Only the status changes: stock, debt and sales stay as they are
+        $estado = $accion === 'no_entregar' ? 'no_entregada' : 'pendiente';
+        $stmt = prepare_or_fail($con, 'UPDATE sap_rs00 SET rs_est = ? WHERE rs_ide = ?');
+        mysqli_stmt_bind_param($stmt, 'si', $estado, $paradaId);
+        if (!mysqli_stmt_execute($stmt)) fallar($con, 500, mysqli_stmt_error($stmt));
+
+        commit_or_fail($con);
+
+        send_json(["success" => true, "message" => "Parada $estado"]);
+    }
+
+    if ($accion === 'entregar') {
+        // Planned lines: producto id => [planned, price]
+        $stmt = prepare_or_fail($con, 'SELECT rl_pro, rl_cpl, rl_pre FROM sap_rl00 WHERE rl_rs = ? ORDER BY rl_ide');
+        mysqli_stmt_bind_param($stmt, 'i', $paradaId);
+        $plan = [];
+        foreach (fetch_all_assoc($stmt) as $l) $plan[(int) $l['rl_pro']] = [(int) $l['rl_cpl'], (float) $l['rl_pre']];
+
+        $stmtProducto = prepare_or_fail($con, 'SELECT pr_nom, pr_val, pr_ret FROM sap_pr00 WHERE pr_ide = ? AND pr_emp = ? AND deleted_at IS NULL');
+        $productos = [];
+        $producto = function ($productoId) use ($con, $userId, $stmtProducto, &$productos) {
+            if (!isset($productos[$productoId])) {
+                mysqli_stmt_bind_param($stmtProducto, 'ii', $productoId, $userId);
+                $rows = fetch_all_assoc($stmtProducto);
+                if (!$rows) fallar($con, 404, "Producto no encontrado: $productoId");
+                $productos[$productoId] = $rows[0];
+            }
+            return $productos[$productoId];
+        };
+
+        // Delivered: producto id => [quantity, returned containers, price]. Without lineas the plan
+        // is delivered as is; with lineas, a planned producto that is not sent was not delivered.
+        $entregado = [];
+        if (!isset($data['lineas'])) {
+            foreach ($plan as $productoId => list($cantidad, $precio)) $entregado[$productoId] = [$cantidad, 0, $precio];
+        } else {
+            if (!is_array($data['lineas'])) fallar($con, 400, "Datos inválidos: lineas debe ser una lista");
+
+            // Same order as POST ventas: every 404 before any 400
+            foreach ($data['lineas'] as $l) {
+                $productoId = isset($l['productoId']) ? parse_non_negative_int($l['productoId']) : null;
+                if ($productoId) $producto($productoId);
+            }
+
+            foreach ($data['lineas'] as $l) {
+                $productoId = isset($l['productoId']) ? parse_non_negative_int($l['productoId']) : null;
+                $cantidad = isset($l['cantidad']) ? parse_non_negative_int($l['cantidad']) : null;
+                $devueltos = isset($l['devueltos']) ? parse_non_negative_int($l['devueltos']) : 0;
+                $precio = isset($l['precio']) ? $l['precio'] : (isset($plan[$productoId]) ? $plan[$productoId][1] : ($productoId ? $producto($productoId)['pr_val'] : null));
+
+                if (!$productoId || $cantidad === null || !is_numeric($precio) || (float) $precio <= 0) {
+                    fallar($con, 400, "Línea inválida: producto, cantidad (0 o más) y precio (mayor a 0) son requeridos");
+                }
+                if ($devueltos === null) fallar($con, 400, "Envases devueltos inválidos: deben ser un número entero mayor o igual a 0");
+                if (isset($entregado[$productoId])) fallar($con, 400, "Producto repetido en la entrega: $productoId");
+
+                $entregado[$productoId] = [$cantidad, $devueltos, (float) $precio];
+            }
+            foreach ($plan as $productoId => list(, $precio)) {
+                if (!isset($entregado[$productoId])) $entregado[$productoId] = [0, 0, $precio];
+            }
+        }
+
+        // The sale lines, built from the delivered quantities only
+        $lineasVenta = [];
+        $monto = 0;
+        foreach ($entregado as $productoId => list($cantidad, $devueltos, $precio)) {
+            if ($cantidad === 0) continue;
+            $lineasVenta[$productoId] = ['nombre' => $producto($productoId)['pr_nom'], 'cantidad' => $cantidad, 'precio' => $precio, 'devueltos' => $devueltos];
+            $monto += $cantidad * $precio;
+        }
+        if (!$lineasVenta) fallar($con, 400, "No hay productos entregados: para registrar que no se entregó use no_entregar");
+
+        // Same sale registration as POST ventas (stock, movements, containers, debt), in this transaction
+        $ventaIds = registrar_venta_lineas($con, $userId, (int) $parada['rs_cli'], array_values($lineasVenta), date('Y-m-d H:i:s'));
+        $ventaPorProducto = array_combine(array_keys($lineasVenta), $ventaIds);
+
+        $stmtUpdate = prepare_or_fail($con, 'UPDATE sap_rl00 SET rl_cen = ?, rl_pre = ?, rl_dev = ?, rl_vt = ? WHERE rl_rs = ? AND rl_pro = ?');
+        $stmtInsert = prepare_or_fail($con, 'INSERT INTO sap_rl00 (rl_rs, rl_pro, rl_cpl, rl_cen, rl_pre, rl_dev, rl_vt) VALUES (?, ?, 0, ?, ?, ?, ?)');
+        foreach ($entregado as $productoId => list($cantidad, $devueltos, $precio)) {
+            $ventaId = isset($ventaPorProducto[$productoId]) ? $ventaPorProducto[$productoId] : null;
+            // Returned containers only make sense for a delivered returnable producto
+            $dev = $ventaId !== null && intval($producto($productoId)['pr_ret']) === 1 ? $devueltos : null;
+            if (isset($plan[$productoId])) {
+                mysqli_stmt_bind_param($stmtUpdate, 'idiiii', $cantidad, $precio, $dev, $ventaId, $paradaId, $productoId);
+                $ok = mysqli_stmt_execute($stmtUpdate);
+            } else {
+                mysqli_stmt_bind_param($stmtInsert, 'iiidii', $paradaId, $productoId, $cantidad, $precio, $dev, $ventaId);
+                $ok = mysqli_stmt_execute($stmtInsert);
+            }
+            if (!$ok) fallar($con, 500, mysqli_error($con));
+        }
+
+        $stmt = prepare_or_fail($con, "UPDATE sap_rs00 SET rs_est = 'entregada' WHERE rs_ide = ?");
+        mysqli_stmt_bind_param($stmt, 'i', $paradaId);
+        if (!mysqli_stmt_execute($stmt)) fallar($con, 500, mysqli_stmt_error($stmt));
+
+        commit_or_fail($con);
+
+        send_json(["success" => true, "monto" => round($monto, 2), "ventas" => $ventaIds]);
     }
 
     if ($accion === 'quitar_parada') {

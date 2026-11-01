@@ -1429,6 +1429,119 @@ expect_status('Copy-previous for a Tuesday with no earlier Tuesday -> 404', 404,
 check('Failed creations created nothing', rp_count() === $n + 1, (string) rp_count());
 expect_status('Ariza has no Monday template of her own -> 404', 404, rp_post(['accion' => 'crear', 'fecha' => RP_LUNES_4, 'origen' => 'plantilla'], $tokA));
 
+// ---------------------------------------------------------------- 10. repartos delivery (entregar / no entregar)
+
+echo "\n# Repartos delivery: stock and debt move only when a stop is delivered, once\n";
+
+$rpExtraName = MARKER . 'rpextra_' . $suffix;
+expect_status('Congre creates a plain producto added at delivery', 201, http('POST', 'productos.php', [], [
+    'nombrePr' => $rpExtraName, 'precioUni' => 500, 'stock' => 20,
+], $tokC));
+$rpExtra = pr_id_by_name($rpExtraName);
+
+$r = rp_post(['accion' => 'crear', 'fecha' => '2099-03-30', 'origen' => 'vacio'], $tokC);
+$rp5Id = (int) ($r[1]['reparto']['rp_ide'] ?? 0);
+$stop5 = [];
+foreach (['a', 'b'] as $k) {
+    $stop5[$k] = (int) (rp_post(['accion' => 'agregar_parada', 'repartoId' => $rp5Id, 'clienteId' => $rpCl[$k]], $tokC)[1]['paradaId'] ?? 0);
+}
+expect_status('Plan stop a: 3 returnable at 1000, 2 plain', 200, rp_post(['accion' => 'guardar_lineas', 'paradaId' => $stop5['a'], 'lineas' => [
+    ['productoId' => $rpRet, 'cantidad' => 3, 'precio' => 1000], ['productoId' => $rpPlain, 'cantidad' => 2],
+]], $tokC));
+expect_status('Plan stop b: 1 returnable', 200, rp_post(['accion' => 'guardar_lineas', 'paradaId' => $stop5['b'], 'lineas' => [
+    ['productoId' => $rpRet, 'cantidad' => 1],
+]], $tokC));
+
+// Everything a delivery may touch, to prove that rejected or repeated requests change nothing
+function rp_state($clienteIds, $productoIds, $repartoId) {
+    global $maxVt;
+    $in = function ($ids) { return implode(',', array_map('intval', $ids)); };
+    return json_encode([
+        db_rows('SELECT pr_ide, pr_stk, pr_vac FROM sap_pr00 WHERE pr_ide IN (' . $in($productoIds) . ') ORDER BY pr_ide'),
+        db_rows('SELECT cl_ide, cl_deb FROM sap_cl00 WHERE cl_ide IN (' . $in($clienteIds) . ') ORDER BY cl_ide'),
+        db_rows('SELECT ce_cli, ce_pro, ce_can FROM sap_ce00 WHERE ce_cli IN (' . $in($clienteIds) . ') ORDER BY ce_cli, ce_pro'),
+        db_rows('SELECT COUNT(*) AS n FROM sap_vt00 WHERE vt_ide > ?', 'i', [$maxVt]),
+        db_rows('SELECT COUNT(*) AS n FROM sap_ms00 WHERE ms_pro IN (' . $in($productoIds) . ')'),
+        db_rows('SELECT s.rs_ide, s.rs_est, l.rl_pro, l.rl_cpl, l.rl_cen, l.rl_pre, l.rl_dev, l.rl_vt FROM sap_rs00 s
+            LEFT JOIN sap_rl00 l ON l.rl_rs = s.rs_ide WHERE s.rs_rp = ? ORDER BY s.rs_ide, l.rl_pro', 'i', [$repartoId]),
+    ]);
+}
+$rpClIds = [$rpCl['a'], $rpCl['b']];
+$rpPrIds = [$rpRet, $rpPlain, $rpExtra];
+$s0 = rp_state($rpClIds, $rpPrIds, $rp5Id);
+
+// Rejected deliveries change nothing
+foreach ([
+    'a negative quantity' => [400, [['productoId' => $rpRet, 'cantidad' => -1]]],
+    'devueltos on a non-returnable producto' => [400, [['productoId' => $rpPlain, 'cantidad' => 1, 'devueltos' => 1]]],
+    'negative devueltos' => [400, [['productoId' => $rpRet, 'cantidad' => 1, 'devueltos' => -1]]],
+    'nothing delivered' => [400, [['productoId' => $rpRet, 'cantidad' => 0]]],
+    'a repeated producto' => [400, [['productoId' => $rpRet, 'cantidad' => 1], ['productoId' => $rpRet, 'cantidad' => 1]]],
+    'an Ariza producto' => [404, [['productoId' => $retId, 'cantidad' => 1]]],
+] as $case => list($status, $lineas)) {
+    expect_status("Deliver with $case -> $status", $status, rp_post(['accion' => 'entregar', 'paradaId' => $stop5['a'], 'lineas' => $lineas], $tokC));
+}
+expect_status('Ariza delivering a Congre stop -> 404', 404, rp_post(['accion' => 'entregar', 'paradaId' => $stop5['a'], 'lineas' => [
+    ['productoId' => $rpRet, 'cantidad' => 1],
+]], $tokA));
+check('Rejected deliveries changed nothing (stock, empties, debt, balances, sales, history, stops)', rp_state($rpClIds, $rpPrIds, $rp5Id) === $s0);
+
+// A7 deliver less than planned, skip a planned producto, add one that was not planned
+$stk0 = [$rpRet => (int) pr_row($rpRet)['pr_stk'], $rpPlain => (int) pr_row($rpPlain)['pr_stk'], $rpExtra => (int) pr_row($rpExtra)['pr_stk']];
+$vac0 = (int) pr_row($rpRet)['pr_vac'];
+$debt0 = cl_debt($rpCl['a']);
+$ce0 = ce_can($rpCl['a'], $rpRet);
+$r = rp_post(['accion' => 'entregar', 'paradaId' => $stop5['a'], 'lineas' => [
+    ['productoId' => $rpRet, 'cantidad' => 2, 'devueltos' => 1], ['productoId' => $rpExtra, 'cantidad' => 1],
+]], $tokC);
+expect_status('Deliver stop a: 2 of 3 returnable (1 returned), 0 plain, 1 extra', 200, $r);
+check('Delivery response returns the delivered amount (2*1000 + 1*500)', ($r[1]['monto'] ?? null) == 2500, short($r[2]));
+$ventas = db_rows('SELECT vt_ide, vt_pro, vt_can, vt_mon, vt_dev FROM sap_vt00 WHERE vt_cli = ? AND vt_ide > ? ORDER BY vt_ide', 'ii', [$rpCl['a'], $maxVt]);
+check('Sales hold the delivered quantities: returnable 2 at 2000 with 1 returned, extra 1 at 500, no plain sale',
+    array_map(function ($v) { return [$v['vt_pro'], (int) $v['vt_can'], (float) $v['vt_mon'], $v['vt_dev'] === null ? null : (int) $v['vt_dev']]; }, $ventas)
+    === [[$rpRetName, 2, 2000.0, 1], [$rpExtraName, 1, 500.0, null]], json_encode($ventas));
+check('Stock moved by the delivered quantities (-2, 0, -1)', (int) pr_row($rpRet)['pr_stk'] === $stk0[$rpRet] - 2
+    && (int) pr_row($rpPlain)['pr_stk'] === $stk0[$rpPlain] && (int) pr_row($rpExtra)['pr_stk'] === $stk0[$rpExtra] - 1);
+check('Debt grew by the delivered amount (+2500)', cl_debt($rpCl['a']) === $debt0 + 2500, (string) cl_debt($rpCl['a']));
+check('Returnable moved like a sale: empties +1, client balance +1', (int) pr_row($rpRet)['pr_vac'] === $vac0 + 1
+    && ce_can($rpCl['a'], $rpRet) === $ce0 + 1);
+$vtByPro = array_column($ventas, 'vt_ide', 'vt_pro');
+$lineas = db_rows('SELECT rl_pro, rl_cpl, rl_cen, rl_pre, rl_dev, rl_vt FROM sap_rl00 WHERE rl_rs = ? ORDER BY rl_pro', 'i', [$stop5['a']]);
+check('Lines keep planned and delivered quantities and link their sale; the added producto has planned 0',
+    array_map(function ($l) { return [(int) $l['rl_pro'], (int) $l['rl_cpl'], (int) $l['rl_cen'], $l['rl_pre'], $l['rl_dev'] === null ? null : (int) $l['rl_dev'], $l['rl_vt'] === null ? null : (int) $l['rl_vt']]; }, $lineas)
+    === [[$rpRet, 3, 2, '1000.00', 1, (int) $vtByPro[$rpRetName]], [$rpPlain, 2, 0, '300.00', null, null], [$rpExtra, 0, 1, '500.00', null, (int) $vtByPro[$rpExtraName]]],
+    json_encode($lineas));
+check('Stop a is entregada', db_row('SELECT rs_est FROM sap_rs00 WHERE rs_ide = ?', 'i', [$stop5['a']])['rs_est'] === 'entregada');
+check('Each delivered line recorded a venta stock movement', db_row("SELECT COUNT(*) AS n FROM sap_ms00 WHERE ms_tip = 'venta' AND ms_vta IN (?, ?)", 'ii',
+    [(int) $vtByPro[$rpRetName], (int) $vtByPro[$rpExtraName]])['n'] == 2);
+
+// A8 a delivered stop is final: delivering again changes nothing
+$s1 = rp_state($rpClIds, $rpPrIds, $rp5Id);
+expect_status('Delivering stop a again -> 409', 409, rp_post(['accion' => 'entregar', 'paradaId' => $stop5['a'], 'lineas' => [
+    ['productoId' => $rpRet, 'cantidad' => 2],
+]], $tokC));
+expect_status('Marking an entregada stop no entregada -> 409', 409, rp_post(['accion' => 'no_entregar', 'paradaId' => $stop5['a']], $tokC));
+expect_status('Reopening an entregada stop -> 409', 409, rp_post(['accion' => 'reabrir', 'paradaId' => $stop5['a']], $tokC));
+check('Repeated delivery changed nothing', rp_state($rpClIds, $rpPrIds, $rp5Id) === $s1);
+
+// A8 no entregada touches nothing; it can be reopened (Q7) and then delivered as planned
+expect_status('Ariza marking a Congre stop no entregada -> 404', 404, rp_post(['accion' => 'no_entregar', 'paradaId' => $stop5['b']], $tokA));
+expect_status('Mark stop b no entregada', 200, rp_post(['accion' => 'no_entregar', 'paradaId' => $stop5['b']], $tokC));
+$s2 = rp_state($rpClIds, $rpPrIds, $rp5Id);
+check('No entregada changed only the stop status', str_replace('"no_entregada"', '"pendiente"', $s2) === $s1, $s2);
+expect_status('Delivering a no entregada stop -> 409', 409, rp_post(['accion' => 'entregar', 'paradaId' => $stop5['b']], $tokC));
+expect_status('Reopen stop b', 200, rp_post(['accion' => 'reabrir', 'paradaId' => $stop5['b']], $tokC));
+check('Reopened stop b is pendiente', db_row('SELECT rs_est FROM sap_rs00 WHERE rs_ide = ?', 'i', [$stop5['b']])['rs_est'] === 'pendiente');
+expect_status('Reopening a pendiente stop -> 409', 409, rp_post(['accion' => 'reabrir', 'paradaId' => $stop5['b']], $tokC));
+$debtB = cl_debt($rpCl['b']);
+$r = rp_post(['accion' => 'entregar', 'paradaId' => $stop5['b']], $tokC);
+expect_status('Deliver stop b without lineas delivers the plan', 200, $r);
+check('Delivering the plan of stop b: 1 returnable at 1100, debt +1100', ($r[1]['monto'] ?? null) == 1100
+    && cl_debt($rpCl['b']) === $debtB + 1100, short($r[2]));
+$lineaB = db_row('SELECT rl_cpl, rl_cen, rl_dev FROM sap_rl00 WHERE rl_rs = ?', 'i', [$stop5['b']]);
+check('Plan delivery stores rl_cen = rl_cpl and 0 returned', (int) $lineaB['rl_cen'] === 1 && (int) $lineaB['rl_dev'] === 0, json_encode($lineaB));
+expect_status('Removing an entregada stop is still rejected -> 409', 409, rp_post(['accion' => 'quitar_parada', 'paradaId' => $stop5['b']], $tokC));
+
 // ---------------------------------------------------------------- summary
 
 echo "\n$passes passed, $failures failed\n";
