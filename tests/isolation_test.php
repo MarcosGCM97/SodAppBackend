@@ -257,6 +257,7 @@ $maxPr = max_id('sap_pr00', 'pr_ide');
 $maxVt = max_id('sap_vt00', 'vt_ide');
 $maxPg = table_exists('sap_pg00') ? max_id('sap_pg00', 'pg_ide') : 0;
 $maxMs = table_exists('sap_ms00') ? max_id('sap_ms00', 'ms_ide') : 0;
+$maxRp = table_exists('sap_rp00') ? max_id('sap_rp00', 'rp_ide') : 0;
 
 $arizaClientes = db_rows('SELECT cl_ide, cl_nom FROM sap_cl00 WHERE cl_emp = ?', 'i', [$arizaId]);
 $arizaClienteIds = ids($arizaClientes, 'cl_ide');
@@ -310,7 +311,11 @@ function table_exists($table) {
 }
 
 function cleanup() {
-    global $maxCl, $maxPr, $maxVt, $maxPg, $maxMs, $addedDeletedAt;
+    global $maxCl, $maxPr, $maxVt, $maxPg, $maxMs, $maxRp, $addedDeletedAt;
+    // repartos reference clientes and productos (stops and lines cascade): delete them first
+    if (table_exists('sap_rp00')) {
+        db_exec('DELETE FROM sap_rp00 WHERE rp_ide > ?', 'i', [$maxRp]);
+    }
     // payments reference clientes (FK): delete them first
     if (table_exists('sap_pg00')) {
         db_exec('DELETE FROM sap_pg00 WHERE pg_ide > ? OR pg_cli > ?', 'ii', [$maxPg, $maxCl]);
@@ -1234,6 +1239,195 @@ expect_status('GET pagos with an invalid mes -> 400', 400, http('GET', 'pagos.ph
 expect_status('GET pagos with an invalid ano -> 400', 400, http('GET', 'pagos.php', ['mes' => 1, 'ano' => '20x6'], null, $tokA));
 set_debt($envClId, $payDebtA);
 set_debt($pagoClC, $payDebtC);
+
+// ---------------------------------------------------------------- 9. repartos (armado de repartos)
+
+echo "\n# Repartos: build, edit and order the deliveries of a date\n";
+
+// Congre owns the repartos here (Ariza attacks), so a template Ariza saves on stage is never touched.
+// Dates are far in the future: 2099-03-02 is a Monday.
+const RP_LUNES_1 = '2099-03-02';
+const RP_LUNES_2 = '2099-03-09';
+const RP_LUNES_3 = '2099-03-16';
+const RP_LUNES_4 = '2099-03-23';
+const RP_MARTES = '2099-03-03';
+
+function rp_post($body, $token) {
+    return http('POST', 'repartos.php', [], $body, $token);
+}
+
+// [cliente id, estado, [[producto id, planned, price], ...]] per stop, in list order
+function rp_shape($reparto) {
+    return array_map(function ($s) {
+        return [(int) $s['cl_ide'], $s['rs_est'], array_map(function ($l) {
+            return [(int) $l['pr_ide'], (int) $l['rl_cpl'], $l['rl_pre']];
+        }, $s['lineas'])];
+    }, $reparto['paradas'] ?? []);
+}
+
+function rp_count() {
+    return (int) db_row('SELECT COUNT(*) AS n FROM sap_rp00')['n'];
+}
+
+check('2099-03-02 is a Monday', date('N', strtotime(RP_LUNES_1)) === '1');
+
+// Congre's fixtures: two Monday clientes, one without delivery days, one deleted Monday cliente,
+// a returnable and a plain producto
+$rpCl = [];
+foreach (['a', 'b', 'c', 'd'] as $k) {
+    expect_status("Congre creates cliente $k for repartos", 201, http('POST', 'clientes.php', [], [
+        'nombreCl' => MARKER . "rp_{$k}_$suffix", 'numTelCl' => '351000009', 'direccionCl' => "Calle reparto $k",
+    ], $tokC));
+    $row = db_row('SELECT cl_ide FROM sap_cl00 WHERE cl_nom = ? AND cl_ide > ?', 'si', [MARKER . "rp_{$k}_$suffix", $maxCl]);
+    $rpCl[$k] = $row ? (int) $row['cl_ide'] : 0;
+}
+set_cd_days($rpCl['a'], [1, 4]);
+set_cd_days($rpCl['b'], [1]);
+set_cd_days($rpCl['c'], []);
+set_cd_days($rpCl['d'], [1]);
+db_exec('UPDATE sap_cl00 SET is_deleted = 1 WHERE cl_ide = ?', 'i', [$rpCl['d']]);
+
+$rpRetName = MARKER . 'rpret_' . $suffix;
+$rpPlainName = MARKER . 'rpplain_' . $suffix;
+expect_status('Congre creates returnable producto for repartos', 201, http('POST', 'productos.php', [], [
+    'nombrePr' => $rpRetName, 'precioUni' => 1000, 'stock' => 20, 'retornable' => true, 'vacios' => 0,
+], $tokC));
+expect_status('Congre creates plain producto for repartos', 201, http('POST', 'productos.php', [], [
+    'nombrePr' => $rpPlainName, 'precioUni' => 300, 'stock' => 20,
+], $tokC));
+$rpRet = pr_id_by_name($rpRetName);
+$rpPlain = pr_id_by_name($rpPlainName);
+
+// A1 create for a concrete date; the weekday comes from the date; ownership
+$r = rp_post(['accion' => 'crear', 'fecha' => RP_LUNES_1, 'origen' => 'vacio'], $tokC);
+expect_status('Congre creates an empty reparto for 2099-03-02', 201, $r);
+$rp1 = $r[1]['reparto'] ?? [];
+$rp1Id = (int) ($rp1['rp_ide'] ?? 0);
+check('Created reparto has rp_fec 2099-03-02, rp_dia 1 (Lunes) and no stops', ($rp1['rp_fec'] ?? null) === RP_LUNES_1
+    && (int) ($rp1['rp_dia'] ?? 0) === 1 && ($rp1['paradas'] ?? null) === [], short($r[2]));
+expect_status('Creating a second reparto for the same date -> 409', 409, rp_post(['accion' => 'crear', 'fecha' => RP_LUNES_1, 'origen' => 'vacio'], $tokC));
+expect_status('Create with an invalid fecha -> 400', 400, rp_post(['accion' => 'crear', 'fecha' => '2099-02-30', 'origen' => 'vacio'], $tokC));
+expect_status('Create with an unknown origen -> 400', 400, rp_post(['accion' => 'crear', 'fecha' => RP_MARTES, 'origen' => 'otro'], $tokC));
+expect_status('Unknown accion -> 400', 400, rp_post(['accion' => 'borrar_todo'], $tokC));
+expect_status('POST repartos without token -> 401', 401, rp_post(['accion' => 'crear', 'fecha' => RP_MARTES, 'origen' => 'vacio'], null));
+$r = http('GET', 'repartos.php', ['fecha' => RP_LUNES_1], null, $tokC);
+check('GET by fecha returns the reparto', $r[0] === 200 && (int) ($r[1]['reparto']['rp_ide'] ?? 0) === $rp1Id, short($r[2]));
+expect_status('Ariza GET Congre reparto by id -> 404', 404, http('GET', 'repartos.php', ['id' => $rp1Id], null, $tokA));
+expect_status('Ariza GET by the same fecha -> 404 (her own, none)', 404, http('GET', 'repartos.php', ['fecha' => RP_LUNES_1], null, $tokA));
+expect_status('GET without id or fecha -> 400', 400, http('GET', 'repartos.php', [], null, $tokC));
+
+// A5 add stops by hand, any cliente of the owner, once per reparto
+expect_status('Add cliente a (Monday) to reparto 1', 201, rp_post(['accion' => 'agregar_parada', 'repartoId' => $rp1Id, 'clienteId' => $rpCl['a']], $tokC));
+expect_status('Add cliente c (no delivery day) to reparto 1', 201, rp_post(['accion' => 'agregar_parada', 'repartoId' => $rp1Id, 'clienteId' => $rpCl['c']], $tokC));
+expect_status('Add cliente b to reparto 1', 201, rp_post(['accion' => 'agregar_parada', 'repartoId' => $rp1Id, 'clienteId' => $rpCl['b']], $tokC));
+expect_status('Adding the same cliente twice -> 409', 409, rp_post(['accion' => 'agregar_parada', 'repartoId' => $rp1Id, 'clienteId' => $rpCl['a']], $tokC));
+expect_status('Adding a deleted cliente -> 404', 404, rp_post(['accion' => 'agregar_parada', 'repartoId' => $rp1Id, 'clienteId' => $rpCl['d']], $tokC));
+expect_status('Adding an Ariza cliente to a Congre reparto -> 404', 404, rp_post(['accion' => 'agregar_parada', 'repartoId' => $rp1Id, 'clienteId' => $envClId], $tokC));
+expect_status('Ariza adding to a Congre reparto -> 404', 404, rp_post(['accion' => 'agregar_parada', 'repartoId' => $rp1Id, 'clienteId' => $envClId], $tokA));
+$rp1 = http('GET', 'repartos.php', ['id' => $rp1Id], null, $tokC)[1]['reparto'] ?? [];
+check('Stops are listed in the order they were added', rp_shape($rp1) === [
+    [$rpCl['a'], 'pendiente', []], [$rpCl['c'], 'pendiente', []], [$rpCl['b'], 'pendiente', []],
+], json_encode(rp_shape($rp1)));
+$first = $rp1['paradas'][0] ?? [];
+check('Each stop returns rs_ide, rs_ord, rs_est, cl_ide, cl_nom, cl_dir, cl_tel, lineas',
+    array_keys($first) === ['rs_ide', 'rs_ord', 'rs_est', 'cl_ide', 'cl_nom', 'cl_dir', 'cl_tel', 'lineas']
+    && $first['cl_dir'] === 'Calle reparto a', json_encode($first));
+$stopId = [];
+foreach ($rp1['paradas'] ?? [] as $s) $stopId[(int) $s['cl_ide']] = (int) $s['rs_ide'];
+
+// S4 planned lines: price defaults to pr_val, replaced as a whole
+$r = rp_post(['accion' => 'guardar_lineas', 'paradaId' => $stopId[$rpCl['a']], 'lineas' => [
+    ['productoId' => $rpRet, 'cantidad' => 3], ['productoId' => $rpPlain, 'cantidad' => 2, 'precio' => 250],
+]], $tokC);
+expect_status('Save the planned lines of stop a', 200, $r);
+expect_status('Save the planned lines of stop b', 200, rp_post(['accion' => 'guardar_lineas', 'paradaId' => $stopId[$rpCl['b']], 'lineas' => [
+    ['productoId' => $rpRet, 'cantidad' => 1],
+]], $tokC));
+$before = rp_shape(http('GET', 'repartos.php', ['id' => $rp1Id], null, $tokC)[1]['reparto'] ?? []);
+check('Lines keep planned quantity; price defaults to pr_val or takes the sent one', $before === [
+    [$rpCl['a'], 'pendiente', [[$rpRet, 3, '1000.00'], [$rpPlain, 2, '250.00']]],
+    [$rpCl['c'], 'pendiente', []],
+    [$rpCl['b'], 'pendiente', [[$rpRet, 1, '1000.00']]],
+], json_encode($before));
+$l = http('GET', 'repartos.php', ['id' => $rp1Id], null, $tokC)[1]['reparto']['paradas'][0]['lineas'][0] ?? [];
+check('Each line returns rl_ide, pr_ide, pr_nom, pr_ret, rl_cpl, rl_cen, rl_pre, rl_dev, rl_vt; undelivered rl_cen null',
+    array_keys($l) === ['rl_ide', 'pr_ide', 'pr_nom', 'pr_ret', 'rl_cpl', 'rl_cen', 'rl_pre', 'rl_dev', 'rl_vt']
+    && $l['rl_cen'] === null && $l['rl_vt'] === null, json_encode($l));
+foreach ([
+    'zero quantity' => [['productoId' => $rpRet, 'cantidad' => 0]],
+    'negative price' => [['productoId' => $rpRet, 'cantidad' => 1, 'precio' => -5]],
+    'repeated producto' => [['productoId' => $rpRet, 'cantidad' => 1], ['productoId' => $rpRet, 'cantidad' => 2]],
+] as $case => $lineas) {
+    expect_status("Save lines with $case -> 400", 400, rp_post(['accion' => 'guardar_lineas', 'paradaId' => $stopId[$rpCl['a']], 'lineas' => $lineas], $tokC));
+}
+expect_status('Save lines with an Ariza producto -> 404', 404, rp_post(['accion' => 'guardar_lineas', 'paradaId' => $stopId[$rpCl['a']], 'lineas' => [
+    ['productoId' => $retId, 'cantidad' => 1],
+]], $tokC));
+expect_status('Ariza saving lines of a Congre stop -> 404', 404, rp_post(['accion' => 'guardar_lineas', 'paradaId' => $stopId[$rpCl['a']], 'lineas' => [
+    ['productoId' => $retId, 'cantidad' => 1],
+]], $tokA));
+check('Rejected line saves changed nothing', rp_shape(http('GET', 'repartos.php', ['id' => $rp1Id], null, $tokC)[1]['reparto'] ?? []) === $before);
+
+// A6 reorder persists
+expect_status('Reorder stops b, a, c', 200, rp_post(['accion' => 'ordenar', 'repartoId' => $rp1Id,
+    'paradas' => [$stopId[$rpCl['b']], $stopId[$rpCl['a']], $stopId[$rpCl['c']]]], $tokC));
+$rp1 = http('GET', 'repartos.php', ['id' => $rp1Id], null, $tokC)[1]['reparto'] ?? [];
+check('GET after reorder lists b, a, c with rs_ord 1..3', array_map(function ($s) { return [(int) $s['cl_ide'], (int) $s['rs_ord']]; }, $rp1['paradas'] ?? [])
+    === [[$rpCl['b'], 1], [$rpCl['a'], 2], [$rpCl['c'], 3]], json_encode($rp1['paradas'] ?? []));
+expect_status('Reorder missing a stop -> 400', 400, rp_post(['accion' => 'ordenar', 'repartoId' => $rp1Id,
+    'paradas' => [$stopId[$rpCl['a']], $stopId[$rpCl['b']]]], $tokC));
+expect_status('Ariza reordering a Congre reparto -> 404', 404, rp_post(['accion' => 'ordenar', 'repartoId' => $rp1Id,
+    'paradas' => [$stopId[$rpCl['a']], $stopId[$rpCl['b']], $stopId[$rpCl['c']]]], $tokA));
+
+// A5 only pendiente stops can be edited or removed
+db_exec("UPDATE sap_rs00 SET rs_est = 'entregada' WHERE rs_ide = ?", 'i', [$stopId[$rpCl['b']]]);
+expect_status('Saving lines of an entregada stop -> 409', 409, rp_post(['accion' => 'guardar_lineas', 'paradaId' => $stopId[$rpCl['b']], 'lineas' => [
+    ['productoId' => $rpRet, 'cantidad' => 9],
+]], $tokC));
+expect_status('Removing an entregada stop -> 409', 409, rp_post(['accion' => 'quitar_parada', 'paradaId' => $stopId[$rpCl['b']]], $tokC));
+db_exec("UPDATE sap_rs00 SET rs_est = 'pendiente' WHERE rs_ide = ?", 'i', [$stopId[$rpCl['b']]]);
+expect_status('Ariza removing a Congre stop -> 404', 404, rp_post(['accion' => 'quitar_parada', 'paradaId' => $stopId[$rpCl['c']]], $tokA));
+expect_status('Remove pendiente stop c', 200, rp_post(['accion' => 'quitar_parada', 'paradaId' => $stopId[$rpCl['c']]], $tokC));
+$rp1Shape = rp_shape(http('GET', 'repartos.php', ['id' => $rp1Id], null, $tokC)[1]['reparto'] ?? []);
+check('Removed stop is gone, the others keep their lines', $rp1Shape === [
+    [$rpCl['b'], 'pendiente', [[$rpRet, 1, '1000.00']]],
+    [$rpCl['a'], 'pendiente', [[$rpRet, 3, '1000.00'], [$rpPlain, 2, '250.00']]],
+], json_encode($rp1Shape));
+
+// A4 from delivery days: Monday clientes, deleted ones skipped, no lines
+$r = rp_post(['accion' => 'crear', 'fecha' => RP_LUNES_2, 'origen' => 'dias'], $tokC);
+expect_status('Create 2099-03-09 from delivery days', 201, $r);
+check('From delivery days: clientes a and b, no lines, deleted d skipped', rp_shape($r[1]['reparto'] ?? []) === [
+    [$rpCl['a'], 'pendiente', []], [$rpCl['b'], 'pendiente', []],
+], short($r[2]));
+
+// A2 template: save reparto 1 as the Monday template, create from it with current prices
+expect_status('Ariza saving a Congre reparto as template -> 404', 404, rp_post(['accion' => 'guardar_plantilla', 'repartoId' => $rp1Id], $tokA));
+expect_status('Save reparto 1 as the Monday template', 200, rp_post(['accion' => 'guardar_plantilla', 'repartoId' => $rp1Id], $tokC));
+expect_status('Save it again (replaces the template)', 200, rp_post(['accion' => 'guardar_plantilla', 'repartoId' => $rp1Id], $tokC));
+check('One Monday template per user', (int) db_row('SELECT COUNT(*) AS n FROM sap_rp00 WHERE rp_emp = ? AND rp_fec IS NULL AND rp_dia = 1', 'i', [$congreId])['n'] === 1);
+db_exec('UPDATE sap_pr00 SET pr_val = 1100 WHERE pr_ide = ?', 'i', [$rpRet]);
+db_exec("UPDATE sap_rs00 SET rs_est = 'entregada' WHERE rs_rp = ?", 'i', [$rp1Id]);
+db_exec('UPDATE sap_rl00 l JOIN sap_rs00 s ON s.rs_ide = l.rl_rs SET l.rl_cen = l.rl_cpl WHERE s.rs_rp = ?', 'i', [$rp1Id]);
+$r = rp_post(['accion' => 'crear', 'fecha' => RP_LUNES_3, 'origen' => 'plantilla'], $tokC);
+expect_status('Create 2099-03-16 from the Monday template', 201, $r);
+$rp3Shape = rp_shape($r[1]['reparto'] ?? []);
+check('From template: same stops, order, products and planned quantities, all pendiente, current prices', $rp3Shape === [
+    [$rpCl['b'], 'pendiente', [[$rpRet, 1, '1100.00']]],
+    [$rpCl['a'], 'pendiente', [[$rpRet, 3, '1100.00'], [$rpPlain, 2, '300.00']]],
+], json_encode($rp3Shape));
+$cen = array_column(array_merge(...array_column($r[1]['reparto']['paradas'] ?? [['lineas' => []]], 'lineas')), 'rl_cen');
+check('From template: delivered quantities empty', $cen !== [] && $cen === array_fill(0, count($cen), null), json_encode($cen));
+$n = rp_count();
+expect_status('Create a Tuesday from a template that does not exist -> 404', 404, rp_post(['accion' => 'crear', 'fecha' => RP_MARTES, 'origen' => 'plantilla'], $tokC));
+
+// A3 copy the previous reparto of the same weekday
+$r = rp_post(['accion' => 'crear', 'fecha' => RP_LUNES_4, 'origen' => 'anterior'], $tokC);
+expect_status('Create 2099-03-23 copying the previous Monday', 201, $r);
+check('Copy-previous takes the latest earlier Monday (2099-03-16)', rp_shape($r[1]['reparto'] ?? []) === $rp3Shape, short($r[2]));
+expect_status('Copy-previous for a Tuesday with no earlier Tuesday -> 404', 404, rp_post(['accion' => 'crear', 'fecha' => RP_MARTES, 'origen' => 'anterior'], $tokC));
+check('Failed creations created nothing', rp_count() === $n + 1, (string) rp_count());
+expect_status('Ariza has no Monday template of her own -> 404', 404, rp_post(['accion' => 'crear', 'fecha' => RP_LUNES_4, 'origen' => 'plantilla'], $tokA));
 
 // ---------------------------------------------------------------- summary
 
