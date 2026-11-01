@@ -1476,6 +1476,7 @@ foreach ([
     'devueltos on a non-returnable producto' => [400, [['productoId' => $rpPlain, 'cantidad' => 1, 'devueltos' => 1]]],
     'negative devueltos' => [400, [['productoId' => $rpRet, 'cantidad' => 1, 'devueltos' => -1]]],
     'nothing delivered' => [400, [['productoId' => $rpRet, 'cantidad' => 0]]],
+    'devueltos on a producto delivered 0' => [400, [['productoId' => $rpPlain, 'cantidad' => 1], ['productoId' => $rpRet, 'cantidad' => 0, 'devueltos' => 3]]],
     'a repeated producto' => [400, [['productoId' => $rpRet, 'cantidad' => 1], ['productoId' => $rpRet, 'cantidad' => 1]]],
     'an Ariza producto' => [404, [['productoId' => $retId, 'cantidad' => 1]]],
 ] as $case => list($status, $lineas)) {
@@ -1541,6 +1542,14 @@ check('Delivering the plan of stop b: 1 returnable at 1100, debt +1100', ($r[1][
 $lineaB = db_row('SELECT rl_cpl, rl_cen, rl_dev FROM sap_rl00 WHERE rl_rs = ?', 'i', [$stop5['b']]);
 check('Plan delivery stores rl_cen = rl_cpl and 0 returned', (int) $lineaB['rl_cen'] === 1 && (int) $lineaB['rl_dev'] === 0, json_encode($lineaB));
 expect_status('Removing an entregada stop is still rejected -> 409', 409, rp_post(['accion' => 'quitar_parada', 'paradaId' => $stop5['b']], $tokC));
+
+// Copies keep the plan only: a producto added at delivery (planned 0) is not carried over
+$r = rp_post(['accion' => 'crear', 'fecha' => '2099-04-06', 'origen' => 'anterior'], $tokC);
+expect_status('Create 2099-04-06 copying the delivered 2099-03-30', 201, $r);
+check('Copy carries planned lines only, not the producto added at delivery', rp_shape($r[1]['reparto'] ?? []) === [
+    [$rpCl['a'], 'pendiente', [[$rpRet, 3, '1100.00'], [$rpPlain, 2, '300.00']]],
+    [$rpCl['b'], 'pendiente', [[$rpRet, 1, '1100.00']]],
+], short($r[2]));
 
 // ---------------------------------------------------------------- summary
 

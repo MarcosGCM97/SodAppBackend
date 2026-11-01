@@ -99,7 +99,8 @@ function reparto_detalle($con, $repartoId) {
 }
 
 // Copies the stops (non-deleted clientes, same order) and planned lines (non-deleted productos,
-// current pr_val) of reparto $origenId into the empty reparto $destinoId; all stops pendiente
+// current pr_val) of reparto $origenId into the empty reparto $destinoId; all stops pendiente.
+// Lines planned 0 (productos added at delivery) are not part of the plan and are not copied.
 function copiar_paradas($con, $origenId, $destinoId) {
     $stmt = prepare_or_fail($con, 'SELECT s.rs_ide, s.rs_cli FROM sap_rs00 s JOIN sap_cl00 c ON c.cl_ide = s.rs_cli
         WHERE s.rs_rp = ? AND c.is_deleted = 0 ORDER BY s.rs_ord, s.rs_ide');
@@ -109,7 +110,7 @@ function copiar_paradas($con, $origenId, $destinoId) {
     $stmtStop = prepare_or_fail($con, "INSERT INTO sap_rs00 (rs_rp, rs_cli, rs_ord, rs_est) VALUES (?, ?, ?, 'pendiente')");
     $stmtLines = prepare_or_fail($con, 'INSERT INTO sap_rl00 (rl_rs, rl_pro, rl_cpl, rl_pre)
         SELECT ?, l.rl_pro, l.rl_cpl, COALESCE(p.pr_val, 0) FROM sap_rl00 l JOIN sap_pr00 p ON p.pr_ide = l.rl_pro
-        WHERE l.rl_rs = ? AND p.deleted_at IS NULL ORDER BY l.rl_ide');
+        WHERE l.rl_rs = ? AND l.rl_cpl > 0 AND p.deleted_at IS NULL ORDER BY l.rl_ide');
 
     foreach ($paradas as $i => $s) {
         $orden = $i + 1;
@@ -329,6 +330,8 @@ if ($method === 'POST') {
                     fallar($con, 400, "Línea inválida: producto, cantidad (0 o más) y precio (mayor a 0) son requeridos");
                 }
                 if ($devueltos === null) fallar($con, 400, "Envases devueltos inválidos: deben ser un número entero mayor o igual a 0");
+                // Returned containers travel with a sale line (like POST ventas), so they need a delivered quantity
+                if ($cantidad === 0 && $devueltos > 0) fallar($con, 400, "Envases devueltos sin entrega: el producto $productoId debe tener cantidad mayor a 0");
                 if (isset($entregado[$productoId])) fallar($con, 400, "Producto repetido en la entrega: $productoId");
 
                 $entregado[$productoId] = [$cantidad, $devueltos, (float) $precio];
