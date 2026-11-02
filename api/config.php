@@ -4,6 +4,9 @@
 // Config file: SODAPP_CONFIG env var, or ../../sodapp-config.php (next to public_html).
 // A missing value stops the request instead of falling back to a default.
 
+// Dates written by PHP (e.g. vt_fec) are Argentina time, whatever php.ini sets.
+date_default_timezone_set('America/Argentina/Buenos_Aires');
+
 function config_value($key) {
     $env = getenv($key);
     // A defined but empty variable is a valid value (e.g. local root without password)
