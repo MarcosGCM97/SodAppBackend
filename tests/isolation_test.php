@@ -816,6 +816,11 @@ check('Non-returnable producto: pr_vac unchanged, pr_stk decremented (5-1)', $ro
 check('Venta with devueltos added the debt (5*100 + 1*50)', cl_debt($envClId) === $debt0 + 550, 'debt=' . cl_debt($envClId));
 $row = db_row('SELECT ce_emp FROM sap_ce00 WHERE ce_cli = ? AND ce_pro = ?', 'ii', [$envClId, $retId]);
 check('Balance row is owned by Ariza', $row && (int) $row['ce_emp'] === $arizaId, json_encode($row));
+// The sale date is Argentina time whatever date.timezone the server's php.ini sets
+$row = db_row('SELECT vt_fec FROM sap_vt00 WHERE vt_ide = ?', 'i', [(int) $vts[0]['vt_ide']]);
+$tzAr = new DateTimeZone('America/Argentina/Buenos_Aires');
+$skew = $row ? abs((new DateTime($row['vt_fec'], $tzAr))->getTimestamp() - (new DateTime('now', $tzAr))->getTimestamp()) : PHP_INT_MAX;
+check('Venta vt_fec is the current Argentina time (within 2 minutes)', $skew <= 120, json_encode($row) . " skew={$skew}s");
 
 $r = http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
     ['nombre' => $retName, 'cantidad' => 1, 'precio' => 100, 'devueltos' => 6],
