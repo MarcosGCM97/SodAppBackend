@@ -55,3 +55,17 @@ Notas:
 - Estos archivos usan la conexión existente `conexion.php` (se incluye desde api/lib.php).
 - El código intenta ser compatible con PHP 5.6+ usando mysqli procedural API.
 - Recomiendo probar con Postman/curl y ajustar nombres de campos si la app móvil usa otras claves.
+
+Repartos (api/repartos.php)
+---------------------------
+Requiere token (`Authorization: Bearer <token>`); cada usuario ve solo sus repartos. Armar o editar un reparto no mueve stock ni deuda.
+
+- `GET ?id=N` o `GET ?fecha=AAAA-MM-DD`: el reparto con sus paradas en orden (`rs_ord`), cada una con `cl_nom`, `cl_dir`, `cl_tel` y sus líneas (`rl_cpl` planificada, `rl_cen` entregada, `rl_pre`). 404 si no existe.
+- `POST` con `{"accion": ...}`:
+  - `crear` `{"fecha":"2026-11-02","origen":"vacio|dias|plantilla|anterior"}` → 201 con el reparto. `dias`: clientes con ese día de entrega; `plantilla`: la plantilla guardada de ese día de la semana; `anterior`: el último reparto anterior del mismo día. Las líneas copiadas toman el precio actual del producto. 409 si ya hay un reparto para esa fecha; 404 si la plantilla o el reparto anterior no existen.
+  - `guardar_plantilla` `{"repartoId":N}`: reemplaza la plantilla de ese día de la semana.
+  - `agregar_parada` `{"repartoId":N,"clienteId":N}` → 201 `{"paradaId":N}`; 409 si el cliente ya está.
+  - `quitar_parada` `{"paradaId":N}` y `guardar_lineas` `{"paradaId":N,"lineas":[{"productoId":N,"cantidad":N,"precio":X}]}` (precio opcional, por defecto el del producto): solo paradas `pendiente`, si no 409.
+  - `ordenar` `{"repartoId":N,"paradas":[rs_ide,...]}`: todas las paradas del reparto en el orden nuevo; 400 si falta o sobra alguna.
+  - `entregar` `{"paradaId":N,"lineas":[{"productoId":N,"cantidad":N,"devueltos":N,"precio":X}]}`: registra lo entregado como ventas (igual que `POST ventas.php`: stock, historial, envases y deuda) en una sola transacción y deja la parada `entregada`. `cantidad` es lo realmente entregado (0 = no se entregó ese producto); un producto planificado que no se envía cuenta como 0 y uno no planificado se agrega con planificada 0. Sin `lineas` se entrega lo planificado. Responde `{"monto":X,"ventas":[ids]}`. 409 si la parada no está `pendiente`, también ante dos entregas simultáneas.
+  - `no_entregar` `{"paradaId":N}`: la parada queda `no_entregada`; no toca stock, deuda ni ventas. `reabrir` `{"paradaId":N}` la vuelve a `pendiente`. Una parada `entregada` es final (se corrige borrando la venta).
