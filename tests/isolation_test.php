@@ -258,8 +258,8 @@ $maxVt = max_id('sap_vt00', 'vt_ide');
 $maxPg = table_exists('sap_pg00') ? max_id('sap_pg00', 'pg_ide') : 0;
 $maxMs = table_exists('sap_ms00') ? max_id('sap_ms00', 'ms_ide') : 0;
 $maxRp = table_exists('sap_rp00') ? max_id('sap_rp00', 'rp_ide') : 0;
-// plants (ruta): restored as a whole at the end
-$plSnapshot = table_exists('sap_pl00') ? db_rows('SELECT * FROM sap_pl00') : null;
+// plants (ruta) of the two test users: restored at the end; other users' rows are never touched
+$plSnapshot = table_exists('sap_pl00') ? db_rows('SELECT * FROM sap_pl00 WHERE pl_emp IN (?, ?)', 'ii', [$arizaId, $congreId]) : null;
 
 $arizaClientes = db_rows('SELECT cl_ide, cl_nom FROM sap_cl00 WHERE cl_emp = ?', 'i', [$arizaId]);
 $arizaClienteIds = ids($arizaClientes, 'cl_ide');
@@ -313,9 +313,9 @@ function table_exists($table) {
 }
 
 function cleanup() {
-    global $maxCl, $maxPr, $maxVt, $maxPg, $maxMs, $maxRp, $addedDeletedAt, $plSnapshot;
+    global $maxCl, $maxPr, $maxVt, $maxPg, $maxMs, $maxRp, $addedDeletedAt, $plSnapshot, $arizaId, $congreId;
     if ($plSnapshot !== null) {
-        db_exec('DELETE FROM sap_pl00');
+        db_exec('DELETE FROM sap_pl00 WHERE pl_emp IN (?, ?)', 'ii', [$arizaId, $congreId]);
         foreach ($plSnapshot as $pl) restore_row('sap_pl00', 'pl_emp', $pl);
     }
     // repartos reference clientes and productos (stops and lines cascade): delete them first
@@ -1634,7 +1634,8 @@ expect_status('POST latitude without longitude -> 400', 400, http('POST', 'clien
 ], $tokC));
 check('Rejected POST created nothing', db_row('SELECT 1 AS x FROM sap_cl00 WHERE cl_nom = ?', 's', [MARKER . 'geo_bad_' . $suffix]) === null);
 
-// T2b plant: GET, guardar_planta, validation, per user
+// T2b plant: GET, guardar_planta, validation, per user (Congre starts without a plant; restored at the end)
+db_exec('DELETE FROM sap_pl00 WHERE pl_emp = ?', 'i', [$congreId]);
 expect_status('GET ruta.php without token -> 401', 401, http('GET', 'ruta.php'));
 $r = http('GET', 'ruta.php', [], null, $tokC);
 expect_status('GET plant of Congre', 200, $r);
