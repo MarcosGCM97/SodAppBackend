@@ -1427,7 +1427,17 @@ expect_status('Create 2099-03-23 copying the previous Monday', 201, $r);
 check('Copy-previous takes the latest earlier Monday (2099-03-16)', rp_shape($r[1]['reparto'] ?? []) === $rp3Shape, short($r[2]));
 expect_status('Copy-previous for a Tuesday with no earlier Tuesday -> 404', 404, rp_post(['accion' => 'crear', 'fecha' => RP_MARTES, 'origen' => 'anterior'], $tokC));
 check('Failed creations created nothing', rp_count() === $n + 1, (string) rp_count());
-expect_status('Ariza has no Monday template of her own -> 404', 404, rp_post(['accion' => 'crear', 'fecha' => RP_LUNES_4, 'origen' => 'plantilla'], $tokA));
+// Ariza never gets Congre's template: 404 without a Monday template of her own, or her own
+// template (stage data may hold one) with none of Congre's clients
+$arizaTpl = (int) db_row('SELECT COUNT(*) AS n FROM sap_rp00 WHERE rp_emp = ? AND rp_fec IS NULL AND rp_dia = 1', 'i', [$arizaId])['n'];
+$r = rp_post(['accion' => 'crear', 'fecha' => RP_LUNES_4, 'origen' => 'plantilla'], $tokA);
+if ($arizaTpl === 0) {
+    expect_status('Ariza has no Monday template of her own -> 404', 404, $r);
+} else {
+    expect_status('Ariza creates from her own Monday template', 201, $r);
+    check("Ariza's reparto has none of Congre's clients",
+        array_intersect(array_column(rp_shape($r[1]['reparto'] ?? []), 0), array_values($rpCl)) === [], short($r[2]));
+}
 
 // ---------------------------------------------------------------- 10. repartos delivery (entregar / no entregar)
 
