@@ -258,6 +258,8 @@ $maxVt = max_id('sap_vt00', 'vt_ide');
 $maxPg = table_exists('sap_pg00') ? max_id('sap_pg00', 'pg_ide') : 0;
 $maxMs = table_exists('sap_ms00') ? max_id('sap_ms00', 'ms_ide') : 0;
 $maxRp = table_exists('sap_rp00') ? max_id('sap_rp00', 'rp_ide') : 0;
+// plants (ruta): restored as a whole at the end
+$plSnapshot = table_exists('sap_pl00') ? db_rows('SELECT * FROM sap_pl00') : null;
 
 $arizaClientes = db_rows('SELECT cl_ide, cl_nom FROM sap_cl00 WHERE cl_emp = ?', 'i', [$arizaId]);
 $arizaClienteIds = ids($arizaClientes, 'cl_ide');
@@ -311,7 +313,11 @@ function table_exists($table) {
 }
 
 function cleanup() {
-    global $maxCl, $maxPr, $maxVt, $maxPg, $maxMs, $maxRp, $addedDeletedAt;
+    global $maxCl, $maxPr, $maxVt, $maxPg, $maxMs, $maxRp, $addedDeletedAt, $plSnapshot;
+    if ($plSnapshot !== null) {
+        db_exec('DELETE FROM sap_pl00');
+        foreach ($plSnapshot as $pl) restore_row('sap_pl00', 'pl_emp', $pl);
+    }
     // repartos reference clientes and productos (stops and lines cascade): delete them first
     if (table_exists('sap_rp00')) {
         db_exec('DELETE FROM sap_rp00 WHERE rp_ide > ?', 'i', [$maxRp]);
@@ -1565,6 +1571,142 @@ check('Copy carries planned lines only, not the producto added at delivery', rp_
     [$rpCl['a'], 'pendiente', [[$rpRet, 3, '1100.00'], [$rpPlain, 2, '300.00']]],
     [$rpCl['b'], 'pendiente', [[$rpRet, 1, '1100.00']]],
 ], short($r[2]));
+
+// ---------------------------------------------------------------- 11. ruta google maps
+
+echo "\n# Ruta: client locality and coordinates, plant, trip times\n";
+
+function cl_geo($clienteId) {
+    return db_row('SELECT cl_loc, cl_lat, cl_lng FROM sap_cl00 WHERE cl_ide = ?', 'i', [$clienteId]);
+}
+
+function ruta_post($body, $token) {
+    return http('POST', 'ruta.php', [], $body, $token);
+}
+
+// T2 POST: localidadCl, latitudCl and longitudCl are stored
+$geoName = MARKER . 'geo_' . $suffix;
+expect_status('Congre creates a cliente with locality and coordinates', 201, http('POST', 'clientes.php', [], [
+    'nombreCl' => $geoName, 'numTelCl' => '351000011', 'direccionCl' => 'San Martin 120',
+    'localidadCl' => 'La Calera', 'latitudCl' => -31.343512, 'longitudCl' => -64.335871,
+], $tokC));
+$geoId = (int) (db_row('SELECT cl_ide FROM sap_cl00 WHERE cl_nom = ? AND cl_ide > ?', 'si', [$geoName, $maxCl])['cl_ide'] ?? 0);
+check('POST stores locality and coordinates', cl_geo($geoId) == ['cl_loc' => 'La Calera', 'cl_lat' => '-31.343512', 'cl_lng' => '-64.335871'],
+    json_encode(cl_geo($geoId)));
+
+// T2 GET by id and list return cl_loc, cl_lat and cl_lng
+$r = http('GET', 'clientes.php', ['id' => $geoId], null, $tokC);
+check('GET by id returns locality and coordinates', ($r[1]['cliente']['cl_loc'] ?? null) === 'La Calera'
+    && ($r[1]['cliente']['cl_lat'] ?? null) == -31.343512 && ($r[1]['cliente']['cl_lng'] ?? null) == -64.335871, short($r[2]));
+$r = http('GET', 'clientes.php', [], null, $tokC);
+$listed = array_values(array_filter(list_of($r[1], 'clientes'), function ($c) use ($geoId) { return (int) $c['cl_ide'] === $geoId; }));
+check('GET list returns locality and coordinates', $listed && $listed[0]['cl_loc'] === 'La Calera' && array_key_exists('cl_lat', $listed[0]), short($r[2]));
+
+// T2 old app POST (no new keys): created with locality and coordinates empty
+$oldName = MARKER . 'geo_old_' . $suffix;
+expect_status('Old app POST without locality still creates the cliente', 201, http('POST', 'clientes.php', [], [
+    'nombreCl' => $oldName, 'numTelCl' => '351000012', 'direccionCl' => 'Belgrano 5',
+], $tokC));
+$oldId = (int) (db_row('SELECT cl_ide FROM sap_cl00 WHERE cl_nom = ? AND cl_ide > ?', 'si', [$oldName, $maxCl])['cl_ide'] ?? 0);
+check('Old app POST leaves locality and coordinates NULL', cl_geo($oldId) === ['cl_loc' => null, 'cl_lat' => null, 'cl_lng' => null], json_encode(cl_geo($oldId)));
+
+// T2 PUT: the new keys update; absent keys leave them unchanged (old app PUT)
+$put = function ($extra) use ($oldId, $oldName, $tokC) {
+    return http('PUT', 'clientes.php', [], array_merge([
+        'cl_ide' => $oldId, 'cl_nom' => $oldName, 'cl_tel' => '351000012', 'cl_dir' => 'Belgrano 5',
+    ], $extra), $tokC);
+};
+expect_status('PUT with locality and coordinates', 200, $put(['cl_loc' => 'Villa Allende', 'cl_lat' => -31.29, 'cl_lng' => -64.29]));
+check('PUT stores locality and coordinates', cl_geo($oldId) == ['cl_loc' => 'Villa Allende', 'cl_lat' => '-31.290000', 'cl_lng' => '-64.290000'], json_encode(cl_geo($oldId)));
+expect_status('Old app PUT without the new keys', 200, $put([]));
+check('Old app PUT leaves locality and coordinates unchanged', cl_geo($oldId) == ['cl_loc' => 'Villa Allende', 'cl_lat' => '-31.290000', 'cl_lng' => '-64.290000'], json_encode(cl_geo($oldId)));
+expect_status('PUT clearing the coordinates with null', 200, $put(['cl_lat' => null, 'cl_lng' => null]));
+check('PUT null clears the coordinates and keeps the locality', cl_geo($oldId) == ['cl_loc' => 'Villa Allende', 'cl_lat' => null, 'cl_lng' => null], json_encode(cl_geo($oldId)));
+
+// T2 invalid coordinates: 400 and nothing changes
+$before = cl_geo($oldId);
+expect_status('PUT latitude without longitude -> 400', 400, $put(['cl_lat' => -31.2]));
+expect_status('PUT latitude out of range -> 400', 400, $put(['cl_lat' => 95, 'cl_lng' => -64.2]));
+expect_status('PUT longitude not a number -> 400', 400, $put(['cl_lat' => -31.2, 'cl_lng' => 'abc']));
+check('Rejected PUTs changed nothing', cl_geo($oldId) == $before, json_encode(cl_geo($oldId)));
+expect_status('POST latitude without longitude -> 400', 400, http('POST', 'clientes.php', [], [
+    'nombreCl' => MARKER . 'geo_bad_' . $suffix, 'numTelCl' => '1', 'direccionCl' => 'x', 'latitudCl' => -31.2,
+], $tokC));
+check('Rejected POST created nothing', db_row('SELECT 1 AS x FROM sap_cl00 WHERE cl_nom = ?', 's', [MARKER . 'geo_bad_' . $suffix]) === null);
+
+// T2b plant: GET, guardar_planta, validation, per user
+expect_status('GET ruta.php without token -> 401', 401, http('GET', 'ruta.php'));
+$r = http('GET', 'ruta.php', [], null, $tokC);
+expect_status('GET plant of Congre', 200, $r);
+check('Congre has no plant yet', array_key_exists('planta', $r[1] ?? []) && $r[1]['planta'] === null, short($r[2]));
+expect_status('guardar_planta without localidad -> 400', 400, ruta_post(['accion' => 'guardar_planta', 'direccion' => 'Ruta 20 km 5'], $tokC));
+expect_status('guardar_planta with latitude only -> 400', 400, ruta_post(['accion' => 'guardar_planta',
+    'direccion' => 'Ruta 20 km 5', 'localidad' => 'La Calera', 'lat' => -31.3], $tokC));
+expect_status('Unknown accion -> 400', 400, ruta_post(['accion' => 'otra'], $tokC));
+expect_status('guardar_planta without coordinates', 200, ruta_post(['accion' => 'guardar_planta',
+    'direccion' => 'Ruta 20 km 5', 'localidad' => 'La Calera'], $tokC));
+expect_status('guardar_planta again with coordinates updates it', 200, ruta_post(['accion' => 'guardar_planta',
+    'direccion' => 'Ruta 20 km 6', 'localidad' => 'La Calera', 'lat' => -31.35, 'lng' => -64.33], $tokC));
+$r = http('GET', 'ruta.php', [], null, $tokC);
+check('GET returns the saved plant', ($r[1]['planta'] ?? null) == ['direccion' => 'Ruta 20 km 6', 'localidad' => 'La Calera', 'lat' => -31.35, 'lng' => -64.33], short($r[2]));
+check('One plant row per user', (int) db_row('SELECT COUNT(*) AS n FROM sap_pl00 WHERE pl_emp = ?', 'i', [$congreId])['n'] === 1);
+$r = http('GET', 'ruta.php', [], null, $tokA);
+check('Ariza does not see Congre plant', ($r[1]['planta']['direccion'] ?? null) !== 'Ruta 20 km 6', short($r[2]));
+
+// T4b route of a reparto: stops in order with locality and coordinates, the plant and the times
+$r = rp_post(['accion' => 'crear', 'fecha' => '2099-05-04', 'origen' => 'vacio'], $tokC);
+expect_status('Congre creates an empty reparto for the route', 201, $r);
+$rtId = (int) ($r[1]['reparto']['rp_ide'] ?? 0);
+$rtStops = [];
+foreach ([$geoId, $oldId, $rpCl['c']] as $cl) {
+    $r = rp_post(['accion' => 'agregar_parada', 'repartoId' => $rtId, 'clienteId' => $cl], $tokC);
+    $rtStops[] = (int) ($r[1]['paradaId'] ?? 0);
+}
+expect_status('Reorder the route stops', 200, rp_post(['accion' => 'ordenar', 'repartoId' => $rtId,
+    'paradas' => [$rtStops[1], $rtStops[0], $rtStops[2]]], $tokC));
+$r = http('GET', 'ruta.php', ['repartoId' => $rtId], null, $tokC);
+expect_status('GET the route of the reparto', 200, $r);
+$ruta = $r[1]['ruta'] ?? [];
+check('Route stops follow the reparto order', array_map(function ($p) { return (int) $p['clienteId']; }, $ruta['paradas'] ?? [])
+    === [$oldId, $geoId, $rpCl['c']], short($r[2]));
+check('Route stop carries address, locality, coordinates and estado', ($ruta['paradas'][1] ?? null) == [
+    'paradaId' => $rtStops[0], 'orden' => 2, 'estado' => 'pendiente', 'clienteId' => $geoId, 'nombre' => $geoName,
+    'direccion' => 'San Martin 120', 'localidad' => 'La Calera', 'lat' => -31.343512, 'lng' => -64.335871,
+], json_encode($ruta['paradas'][1] ?? null));
+check('Route stop without coordinates has null lat/lng', array_key_exists('lat', $ruta['paradas'][0] ?? [])
+    && $ruta['paradas'][0]['lat'] === null && $ruta['paradas'][0]['lng'] === null);
+check('Route carries the plant and no times yet', ($ruta['planta']['direccion'] ?? null) === 'Ruta 20 km 6'
+    && array_key_exists('inicio', $ruta) && $ruta['inicio'] === null && $ruta['fin'] === null, short($r[2]));
+expect_status('Ariza reading Congre route -> 404', 404, http('GET', 'ruta.php', ['repartoId' => $rtId], null, $tokA));
+expect_status('Route of a nonexistent reparto -> 404', 404, http('GET', 'ruta.php', ['repartoId' => 999999999], null, $tokC));
+
+// T4b finalizar before iniciar, iniciar once, finalizar only without pendiente stops
+expect_status('finalizar before iniciar -> 409', 409, ruta_post(['accion' => 'finalizar', 'repartoId' => $rtId], $tokC));
+expect_status('Ariza starting Congre route -> 404', 404, ruta_post(['accion' => 'iniciar', 'repartoId' => $rtId], $tokA));
+check('Rejected calls left the times empty', db_row('SELECT rp_ini, rp_fin FROM sap_rp00 WHERE rp_ide = ?', 'i', [$rtId]) === ['rp_ini' => null, 'rp_fin' => null]);
+$r = ruta_post(['accion' => 'iniciar', 'repartoId' => $rtId], $tokC);
+expect_status('iniciar the route', 200, $r);
+$ini = db_row('SELECT rp_ini FROM sap_rp00 WHERE rp_ide = ?', 'i', [$rtId])['rp_ini'];
+check('iniciar stores rp_ini and returns it', $ini !== null && ($r[1]['inicio'] ?? null) === $ini, short($r[2]));
+db_exec('UPDATE sap_rp00 SET rp_ini = ? WHERE rp_ide = ?', 'si', ['2099-05-04 08:00:00', $rtId]);
+$r = ruta_post(['accion' => 'iniciar', 'repartoId' => $rtId], $tokC);
+check('iniciar again keeps the first start', ($r[1]['inicio'] ?? null) === '2099-05-04 08:00:00'
+    && db_row('SELECT rp_ini FROM sap_rp00 WHERE rp_ide = ?', 'i', [$rtId])['rp_ini'] === '2099-05-04 08:00:00', short($r[2]));
+expect_status('finalizar with pendiente stops -> 409', 409, ruta_post(['accion' => 'finalizar', 'repartoId' => $rtId], $tokC));
+check('Rejected finalizar left rp_fin empty', db_row('SELECT rp_fin FROM sap_rp00 WHERE rp_ide = ?', 'i', [$rtId])['rp_fin'] === null);
+foreach ($rtStops as $s) rp_post(['accion' => 'no_entregar', 'paradaId' => $s], $tokC);
+$r = ruta_post(['accion' => 'finalizar', 'repartoId' => $rtId], $tokC);
+expect_status('finalizar after every stop is resolved', 200, $r);
+$fin = db_row('SELECT rp_fin FROM sap_rp00 WHERE rp_ide = ?', 'i', [$rtId])['rp_fin'];
+check('finalizar stores rp_fin and returns both times', $fin !== null && ($r[1]['fin'] ?? null) === $fin
+    && ($r[1]['inicio'] ?? null) === '2099-05-04 08:00:00', short($r[2]));
+expect_status('finalizar twice -> 409', 409, ruta_post(['accion' => 'finalizar', 'repartoId' => $rtId], $tokC));
+check('Second finalizar kept the first end', db_row('SELECT rp_fin FROM sap_rp00 WHERE rp_ide = ?', 'i', [$rtId])['rp_fin'] === $fin);
+rp_post(['accion' => 'guardar_plantilla', 'repartoId' => $rtId], $tokC);
+$tplId = (int) (db_row('SELECT rp_ide FROM sap_rp00 WHERE rp_emp = ? AND rp_fec IS NULL AND rp_ide > ? ORDER BY rp_ide DESC LIMIT 1', 'ii', [$congreId, $maxRp])['rp_ide'] ?? 0);
+expect_status('Route of a weekday template -> 404', 404, http('GET', 'ruta.php', ['repartoId' => $tplId], null, $tokC));
+$r = http('GET', 'repartos.php', ['id' => $rtId], null, $tokC);
+check('GET repartos returns the trip times', ($r[1]['reparto']['rp_ini'] ?? null) === '2099-05-04 08:00:00' && ($r[1]['reparto']['rp_fin'] ?? null) === $fin, short($r[2]));
 
 // ---------------------------------------------------------------- summary
 
