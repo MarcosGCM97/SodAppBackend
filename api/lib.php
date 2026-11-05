@@ -80,6 +80,39 @@ function parse_non_negative_int($value) {
     return null;
 }
 
+// Latitude/longitude pair in WGS84 degrees (numbers or numeric strings). Both null means no
+// coordinates. Returns [lat, lng] (floats or both null), or false when only one is given,
+// one is not a number or out of range (lat -90..90, lng -180..180).
+function parse_coordenadas($lat, $lng) {
+    if ($lat === null && $lng === null) return [null, null];
+
+    $esNumero = function ($v) { return is_int($v) || is_float($v) || (is_string($v) && is_numeric($v)); };
+
+    if (!$esNumero($lat) || !$esNumero($lng)) return false;
+
+    $lat = (float) $lat;
+    $lng = (float) $lng;
+
+    if ($lat < -90 || $lat > 90 || $lng < -180 || $lng > 180) return false;
+
+    return [$lat, $lng];
+}
+
+// Optional trimmed text of at most $max characters: null when absent or blank, false when too long
+function parse_texto_opcional($value, $max) {
+    if ($value === null) return null;
+
+    if (!is_string($value)) return false;
+
+    $value = trim($value);
+
+    if ($value === '') return null;
+
+    $largo = function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
+
+    return $largo > $max ? false : $value;
+}
+
 // Records a stock movement of the owner's product in sap_ms00 (historial de stock).
 // Call it right after changing pr_stk, inside the same transaction: ms_stk takes the
 // stock that the change left. $tipo: venta, venta_eliminada, llenado, ajuste, alta.
