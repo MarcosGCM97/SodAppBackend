@@ -16,7 +16,7 @@ if ($method === 'GET') {
 
         $id = intval($_GET['id']);
 
-        $stmt = prepare_or_fail($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ? AND is_deleted = 0');
+        $stmt = prepare_or_fail($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp, cl_loc, cl_lat, cl_lng FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ? AND is_deleted = 0');
 
         mysqli_stmt_bind_param($stmt, 'ii', $id, $userId);
 
@@ -31,7 +31,7 @@ if ($method === 'GET') {
         send_json(["success" => false, "error" => "Cliente no encontrado"], 404);
     } else {
         // $userId is an int from the token; plain query keeps the string-typed JSON of this list
-        $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp FROM sap_cl00 WHERE cl_emp = ' . intval($userId) . ' AND is_deleted = 0 ORDER BY cl_nom');
+        $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp, cl_loc, cl_lat, cl_lng FROM sap_cl00 WHERE cl_emp = ' . intval($userId) . ' AND is_deleted = 0 ORDER BY cl_nom');
 
         if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
@@ -55,9 +55,20 @@ if ($method === 'POST') {
 
     if (!$nombre || !$tel || !$dir) send_json(["success" => false, "error" => "Datos incompletos: nombre, telefono y direccion"], 400);
 
-    $stmt = prepare_or_fail($con, 'INSERT INTO sap_cl00 SET cl_nom = ?, cl_tel = ?, cl_dir = ?, cl_emp = ?');
+    // Optional (older app versions do not send them): locality and coordinates
+    $loc = parse_texto_opcional(isset($data['localidadCl']) ? $data['localidadCl'] : null, 100);
 
-    mysqli_stmt_bind_param($stmt, 'sssi', $nombre, $tel, $dir, $userId);
+    if ($loc === false) send_json(["success" => false, "error" => "Localidad inválida (máximo 100 caracteres)"], 400);
+
+    $coords = parse_coordenadas(isset($data['latitudCl']) ? $data['latitudCl'] : null, isset($data['longitudCl']) ? $data['longitudCl'] : null);
+
+    if ($coords === false) send_json(["success" => false, "error" => "Coordenadas inválidas: latitud y longitud van juntas y en grados"], 400);
+
+    list($lat, $lng) = $coords;
+
+    $stmt = prepare_or_fail($con, 'INSERT INTO sap_cl00 SET cl_nom = ?, cl_tel = ?, cl_dir = ?, cl_emp = ?, cl_loc = ?, cl_lat = ?, cl_lng = ?');
+
+    mysqli_stmt_bind_param($stmt, 'sssisdd', $nombre, $tel, $dir, $userId, $loc, $lat, $lng);
 
     if (mysqli_stmt_execute($stmt)) {
         send_json(["success" => true, "message" => "Cliente creado", "id" => mysqli_insert_id($con)], 201);
@@ -82,6 +93,34 @@ if ($method === 'PUT') {
 
     if (!$nombre || !$tel || !$dir) send_json(["success" => false, "error" => "Datos incompletos"], 400);
 
+    // Locality and coordinates change only when their keys are sent (older app versions omit them);
+    // null clears them. Latitude and longitude always travel together.
+    $sets = 'cl_nom = ?, cl_tel = ?, cl_dir = ?';
+    $types = 'sss';
+    $params = [$nombre, $tel, $dir];
+
+    if (array_key_exists('cl_loc', $data)) {
+        $loc = parse_texto_opcional($data['cl_loc'], 100);
+
+        if ($loc === false) send_json(["success" => false, "error" => "Localidad inválida (máximo 100 caracteres)"], 400);
+
+        $sets .= ', cl_loc = ?';
+        $types .= 's';
+        $params[] = $loc;
+    }
+
+    if (array_key_exists('cl_lat', $data) || array_key_exists('cl_lng', $data)) {
+        $coords = (array_key_exists('cl_lat', $data) && array_key_exists('cl_lng', $data))
+            ? parse_coordenadas($data['cl_lat'], $data['cl_lng']) : false;
+
+        if ($coords === false) send_json(["success" => false, "error" => "Coordenadas inválidas: latitud y longitud van juntas y en grados"], 400);
+
+        $sets .= ', cl_lat = ?, cl_lng = ?';
+        $types .= 'dd';
+        $params[] = $coords[0];
+        $params[] = $coords[1];
+    }
+
     // Ownership check first: an UPDATE with unchanged values affects 0 rows
     $check = prepare_or_fail($con, 'SELECT 1 FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ?');
 
@@ -93,9 +132,13 @@ if ($method === 'PUT') {
 
     if (!$resCheck || mysqli_num_rows($resCheck) === 0) send_json(["success" => false, "error" => "No se encontró el cliente"], 404);
 
-    $stmt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_nom = ?, cl_tel = ?, cl_dir = ? WHERE cl_ide = ? AND cl_emp = ?');
+    $stmt = prepare_or_fail($con, "UPDATE sap_cl00 SET $sets WHERE cl_ide = ? AND cl_emp = ?");
 
-    mysqli_stmt_bind_param($stmt, 'sssii', $nombre, $tel, $dir, $id, $userId);
+    $types .= 'ii';
+    $params[] = $id;
+    $params[] = $userId;
+
+    mysqli_stmt_bind_param($stmt, $types, ...$params);
 
     if (mysqli_stmt_execute($stmt)) {
         send_json(["success" => true, "message" => "Cliente actualizado"]);
