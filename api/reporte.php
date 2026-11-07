@@ -54,11 +54,12 @@ function limites($desde, $hasta) {
     return [$desde->format('Y-m-d 00:00:00'), $hasta->modify('+1 day')->format('Y-m-d 00:00:00')];
 }
 
-// Stored line amount; legacy rows without one are valued at the current price and flagged
-const MONTO_LINEA = 'CASE WHEN vt.vt_mon IS NOT NULL AND vt.vt_mon > 0 THEN vt.vt_mon ELSE COALESCE(pr.pr_val, 0) * vt.vt_can END';
+// Stored line amount; legacy rows without one are valued at the current price and flagged.
+// The price is a scalar subquery, not a JOIN, so a line can never be counted twice.
+const MONTO_LINEA = 'CASE WHEN vt.vt_mon IS NOT NULL AND vt.vt_mon > 0 THEN vt.vt_mon
+    ELSE COALESCE((SELECT MAX(pr.pr_val) FROM sap_pr00 AS pr WHERE pr.pr_nom = vt.vt_pro AND pr.pr_emp = vt.vt_emp), 0) * vt.vt_can END';
 const ESTIMADA = '(vt.vt_mon IS NULL OR vt.vt_mon <= 0)';
 const FROM_VENTAS = 'FROM sap_vt00 AS vt
-    LEFT JOIN sap_pr00 AS pr ON pr.pr_nom = vt.vt_pro AND pr.pr_emp = vt.vt_emp
     WHERE vt.vt_emp = ? AND vt.vt_fec >= ? AND vt.vt_fec < ?';
 // One sale = one registration: every line of a sale shares cliente and timestamp
 const CLAVE_VENTA = 'COALESCE(vt.vt_cli, 0), vt.vt_fec';
@@ -121,8 +122,7 @@ $porCliente = array_map(function ($r) {
 }, filas($con, 'SELECT vt.vt_cli AS clienteId, MAX(cl.cl_nom) AS cliente,
         COUNT(DISTINCT vt.vt_fec) AS ventas, SUM(' . MONTO_LINEA . ') AS monto
     FROM sap_vt00 AS vt
-    LEFT JOIN sap_pr00 AS pr ON pr.pr_nom = vt.vt_pro AND pr.pr_emp = vt.vt_emp
-    LEFT JOIN sap_cl00 AS cl ON cl.cl_ide = vt.vt_cli
+    LEFT JOIN sap_cl00 AS cl ON cl.cl_ide = vt.vt_cli AND cl.cl_emp = vt.vt_emp
     WHERE vt.vt_emp = ? AND vt.vt_fec >= ? AND vt.vt_fec < ?
     GROUP BY vt.vt_cli ORDER BY monto DESC, cliente', $userId, $rango));
 
@@ -144,8 +144,7 @@ $detalle = array_map(function ($r) {
 }, filas($con, 'SELECT vt.vt_fec AS fecha, vt.vt_cli AS clienteId, cl.cl_nom AS cliente, vt.vt_pro AS producto,
         vt.vt_can AS cantidad, ' . MONTO_LINEA . ' AS monto, ' . ESTIMADA . ' AS estimado
     FROM sap_vt00 AS vt
-    LEFT JOIN sap_pr00 AS pr ON pr.pr_nom = vt.vt_pro AND pr.pr_emp = vt.vt_emp
-    LEFT JOIN sap_cl00 AS cl ON cl.cl_ide = vt.vt_cli
+    LEFT JOIN sap_cl00 AS cl ON cl.cl_ide = vt.vt_cli AND cl.cl_emp = vt.vt_emp
     WHERE vt.vt_emp = ? AND vt.vt_fec >= ? AND vt.vt_fec < ?
     ORDER BY vt.vt_fec, vt.vt_ide', $userId, $rango));
 

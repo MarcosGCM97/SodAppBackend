@@ -1808,9 +1808,12 @@ expect_status('POST reporte -> 405', 405, http('POST', 'reporte.php', [], ['x' =
 
 // B2 payment dates follow Argentina time even when the MySQL server runs on UTC
 $tzBefore = db_row('SELECT @@global.time_zone AS tz')['tz'];
+// restored even when the script aborts before the next statement
+register_shutdown_function(function () use ($tzBefore) { db_exec('SET GLOBAL time_zone = ?', 's', [$tzBefore]); });
 db_exec("SET GLOBAL time_zone = '+00:00'");
+check('Test server runs on UTC for the timezone check', db_row('SELECT @@global.time_zone AS tz')['tz'] === '+00:00');
 set_debt($repX, 100);
-http('PUT', 'deudaCliente.php', ['id' => $repX, 'deuda' => 5, 'formaPago' => $fpEfectivo], null, $tokC);
+expect_status('PUT deuda on a UTC server', 200, http('PUT', 'deudaCliente.php', ['id' => $repX, 'deuda' => 5, 'formaPago' => $fpEfectivo], null, $tokC));
 db_exec('SET GLOBAL time_zone = ?', 's', [$tzBefore]);
 $pgFec = db_row('SELECT pg_fec FROM sap_pg00 WHERE pg_cli = ? ORDER BY pg_ide DESC LIMIT 1', 'i', [$repX])['pg_fec'] ?? null;
 $ahoraAr = new DateTime('now', new DateTimeZone('America/Argentina/Buenos_Aires'));
