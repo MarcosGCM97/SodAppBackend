@@ -154,7 +154,9 @@ list($compVendido, $compVentas) = totales_ventas($con, $userId, $rangoComp);
 // Payments were not recorded before migration 007: periods before this date have no cobros
 $stmt = prepare_or_fail($con, 'SELECT MIN(pg_fec) AS primero FROM sap_pg00 WHERE pg_emp = ?');
 mysqli_stmt_bind_param($stmt, 'i', $userId);
-mysqli_stmt_execute($stmt);
+if (!mysqli_stmt_execute($stmt)) {
+    send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
+}
 $primerCobro = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt))['primero'];
 
 send_json([
