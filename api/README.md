@@ -133,3 +133,9 @@ Login and session:
 - `POST login.php` (and the legacy `GET login.php?nombre=&contraseña=`) answers `{"success":true,"message","usuario":{"us_ide","us_nom","us_emp","us_rol","us_act"},"token","es_dueno":bool,"permisos":[codes]}`; the owner gets the whole catalog. Never returns `us_pas`. Unknown name 404, wrong password 401, inactive user 401 `Usuario inactivo.`.
 - `GET sesion.php` -> `{"success":true,"us_ide":N,"us_nom":"..","es_dueno":bool,"permisos":[..]}`: the current permissions, for an app that starts with a saved session.
 
+Admin API (owner only):
+- `GET usuarios.php` -> `{"success":true,"usuarios":[{"us_ide","us_nom","us_rol","ro_nom","us_act","es_dueno"}]}` (company users, owner first).
+- `POST usuarios.php` `{"nombre","contrasena","rol"}` -> 201 `{"success":true,"us_ide":N}`: active user of the company, password stored with `password_hash`. 400 name not 3-100 characters (trimmed), password under 6 characters or missing role; 404 role not in the company; 409 name taken (names are global: login is by name).
+- `PUT usuarios.php` `{"id","rol"?,"contrasena"?,"activo"?}` -> `{"success":true}`. 404 user not in the company; 400 when the target is the owner, nothing to change or invalid data.
+- `GET roles.php` -> `{"success":true,"roles":[{"ro_ide","ro_nom","permisos":[codes],"usuarios":N}],"permisos_disponibles":[{"pm_cod","pm_des"}]}`.
+- `POST roles.php` `{"nombre","permisos":[codes]}` -> 201 `{"success":true,"ro_ide":N}`; `PUT roles.php` `{"id","nombre","permisos"}` replaces name and permissions; `DELETE roles.php?id=N`. 400 name not 1-50 characters or unknown code; 404 role not in the company; 409 duplicate name in the company, or (DELETE) users still have the role. Writes run in one transaction.
