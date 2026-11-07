@@ -1,5 +1,6 @@
 -- Roles and permissions per user (roles-usuarios): company scope, roles, permission catalog.
--- Run AFTER 010_cl_deb_decimal.sql and a full SQL backup of the database.
+-- Run AFTER 009_ruta_google_maps.sql and a full SQL backup of the database.
+-- Independent of 010_cl_deb_decimal.sql (any order works).
 --
 -- Today a user is a company: every row is owned by the user id (cl_emp = us_ide). This adds
 -- the company of each user and the roles that limit what a non-owner user can do:
@@ -20,8 +21,8 @@
 --
 -- NOT idempotent: run it once. Before running, confirm in a fresh backup that sap_us00 has
 -- no us_emp column and that sap_ro00, sap_pm00 and sap_rm00 do not exist yet. If the
--- duplicate-name report below returns rows, rename those users before the unique index
--- (the statement fails otherwise and the rest of the script must then be run by hand).
+-- duplicate-name report below returns rows, rename those users and run the script again:
+-- the unique index is the first change, so a failure there leaves the database untouched.
 -- Plain statements on purpose (see 008): PREPARE statements fail with #1044 on the
 -- production phpMyAdmin. Tables are schema-qualified; for another database, replace
 -- c2761775_sodapp with its name.
@@ -32,6 +33,10 @@ SELECT COUNT(*) AS usuarios FROM `c2761775_sodapp`.`sap_us00`;
 
 -- Duplicate user names: must return no rows (login is by name, the index below is unique)
 SELECT us_nom, COUNT(*) AS repetidos FROM `c2761775_sodapp`.`sap_us00` GROUP BY us_nom HAVING COUNT(*) > 1;
+
+-- First change on purpose: when a duplicate name makes it fail, nothing else has run yet
+ALTER TABLE `c2761775_sodapp`.`sap_us00`
+    ADD UNIQUE KEY uq_us_nom (us_nom);
 
 -- us_ide must generate ids for the users created by the admin API (no-op when it already does)
 ALTER TABLE `c2761775_sodapp`.`sap_us00`
@@ -48,9 +53,6 @@ UPDATE `c2761775_sodapp`.`sap_us00` SET us_emp = us_ide WHERE us_emp IS NULL;
 ALTER TABLE `c2761775_sodapp`.`sap_us00`
     MODIFY us_emp INT NOT NULL,
     ADD KEY idx_us_emp (us_emp);
-
-ALTER TABLE `c2761775_sodapp`.`sap_us00`
-    ADD UNIQUE KEY uq_us_nom (us_nom);
 
 CREATE TABLE `c2761775_sodapp`.`sap_ro00` (
     ro_ide INT NOT NULL AUTO_INCREMENT,
