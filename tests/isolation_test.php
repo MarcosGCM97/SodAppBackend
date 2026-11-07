@@ -1117,8 +1117,9 @@ expect_status('GET movimientos of a soft-deleted producto -> 404', 404, http('GE
 db_exec('UPDATE sap_pr00 SET deleted_at = NULL WHERE pr_ide = ?', 'i', [$histId]);
 
 // Deleting a sale reverts its amount from the debt, even below zero (credit balance)
+// The raw DECIMAL(12,2) column as MySQL returns it ("300.00"), so cents are compared exactly
 function deuda_of($clienteId) {
-    return (int) db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$clienteId])['cl_deb'];
+    return db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$clienteId])['cl_deb'];
 }
 function last_venta_of($name, $userId) {
     return (int) db_row('SELECT MAX(vt_ide) AS id FROM sap_vt00 WHERE vt_pro = ? AND vt_emp = ?', 'si', [$name, $userId])['id'];
@@ -1130,25 +1131,51 @@ expect_status('Ariza POST venta of 1000 for debt revert', 201, http('POST', 'ven
 ]], $tokA));
 $debtVtId = last_venta_of($histName, $arizaId);
 expect_status('Ariza pays 700 of the 1000', 200, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 700], null, $tokA));
-check('Debt after paying 700 of 1000 is 300', deuda_of($envClId) === 300, (string) deuda_of($envClId));
+check('Debt after paying 700 of 1000 is 300', deuda_of($envClId) === '300.00', (string) deuda_of($envClId));
 
 expect_status('Congre DELETE Ariza venta with revertir_deuda -> 404', 404, http('DELETE', 'ventas.php', ['id' => $debtVtId, 'revertir_deuda' => 1], null, $tokC));
-check('Rejected DELETE left the debt unchanged', deuda_of($envClId) === 300, (string) deuda_of($envClId));
+check('Rejected DELETE left the debt unchanged', deuda_of($envClId) === '300.00', (string) deuda_of($envClId));
 
 expect_status('Ariza DELETE paid venta with revertir_deuda', 200, http('DELETE', 'ventas.php', ['id' => $debtVtId, 'revertir_deuda' => 1], null, $tokA));
-check('Deleting a partly paid venta leaves a credit balance of -700', deuda_of($envClId) === -700, (string) deuda_of($envClId));
+check('Deleting a partly paid venta leaves a credit balance of -700', deuda_of($envClId) === '-700.00', (string) deuda_of($envClId));
 list(, $j) = http('GET', 'deudaCliente.php', ['id' => $envClId], null, $tokA);
-check('GET deudaCliente returns the credit balance', isset($j['deudor']['cl_deb']) && (int) $j['deudor']['cl_deb'] === -700, json_encode($j));
+check('GET deudaCliente returns the credit balance', ($j['deudor']['cl_deb'] ?? null) === '-700.00', json_encode($j));
 
 expect_status('Ariza POST venta of 500 consumes the credit', 201, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
     ['nombre' => $histName, 'cantidad' => 1, 'precio' => 500],
 ]], $tokA));
-check('Next venta consumes the credit balance (-200)', deuda_of($envClId) === -200, (string) deuda_of($envClId));
+check('Next venta consumes the credit balance (-200)', deuda_of($envClId) === '-200.00', (string) deuda_of($envClId));
 
 // Older app versions revert the debt themselves after the DELETE
 expect_status('Ariza DELETE venta without revertir_deuda', 200, http('DELETE', 'ventas.php', ['id' => last_venta_of($histName, $arizaId)], null, $tokA));
-check('DELETE without revertir_deuda leaves the debt unchanged', deuda_of($envClId) === -200, (string) deuda_of($envClId));
-db_exec('UPDATE sap_cl00 SET cl_deb = ? WHERE cl_ide = ?', 'ii', [$debtBefore, $envClId]);
+check('DELETE without revertir_deuda leaves the debt unchanged', deuda_of($envClId) === '-200.00', (string) deuda_of($envClId));
+
+// Debts keep cents: sales, reverted sales and payments move the exact amount
+db_exec('UPDATE sap_cl00 SET cl_deb = 0 WHERE cl_ide = ?', 'i', [$envClId]);
+expect_status('Ariza POST venta of 1250.50', 201, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $histName, 'cantidad' => 1, 'precio' => 1250.5],
+]], $tokA));
+check('A venta of 1250.50 adds exactly 1250.50 to the debt', deuda_of($envClId) === '1250.50', (string) deuda_of($envClId));
+$centsVtId = last_venta_of($histName, $arizaId);
+// 3 * 0.1 is 0.30000000000000004 in floating point
+expect_status('Ariza POST venta of 3 x 0.10', 201, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $histName, 'cantidad' => 3, 'precio' => 0.1],
+]], $tokA));
+check('A venta of 3 x 0.10 adds exactly 0.30 to the debt', deuda_of($envClId) === '1250.80', (string) deuda_of($envClId));
+expect_status('Ariza DELETE the 1250.50 venta with revertir_deuda', 200, http('DELETE', 'ventas.php', ['id' => $centsVtId, 'revertir_deuda' => 1], null, $tokA));
+check('Deleting the 1250.50 venta subtracts exactly 1250.50', deuda_of($envClId) === '0.30', (string) deuda_of($envClId));
+
+$centsPg = (int) db_row('SELECT COALESCE(MAX(pg_ide), 0) AS id FROM sap_pg00')['id'];
+list($st, , $raw) = http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => '0.004'], null, $tokA);
+check('PUT deuda that rounds to 0.00 -> 400', $st === 400
+    && (json_decode($raw, true)['error'] ?? null) === 'La deuda debe ser mayor a 0', "$st $raw");
+check('PUT deuda that rounds to 0.00 left the debt unchanged', deuda_of($envClId) === '0.30', (string) deuda_of($envClId));
+expect_status('Ariza pays exactly the whole 0.30 debt', 200, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => '0.3'], null, $tokA));
+check('Paying exactly the whole debt with cents leaves 0.00', deuda_of($envClId) === '0.00', (string) deuda_of($envClId));
+check('Only the accepted cents payment was stored, with its exact amount',
+    array_column(db_rows('SELECT pg_mon FROM sap_pg00 WHERE pg_ide > ? ORDER BY pg_ide', 'i', [$centsPg]), 'pg_mon') === ['0.30'],
+    json_encode(db_rows('SELECT pg_mon FROM sap_pg00 WHERE pg_ide > ?', 'i', [$centsPg])));
+db_exec('UPDATE sap_cl00 SET cl_deb = ? WHERE cl_ide = ?', 'si', [$debtBefore, $envClId]);
 
 // ---------------------------------------------------------------- 8. payments (formas de pago)
 
@@ -1162,11 +1189,12 @@ function payments_of($clienteId) {
         return ['pg_cli' => (int) $p['pg_cli'], 'pg_mon' => $p['pg_mon'], 'pg_fp' => (int) $p['pg_fp'], 'pg_emp' => (int) $p['pg_emp']];
     }, $rows);
 }
+// Bound as a string so a decimal debt is restored exactly
 function set_debt($clienteId, $deuda) {
-    db_exec('UPDATE sap_cl00 SET cl_deb = ? WHERE cl_ide = ?', 'ii', [$deuda, $clienteId]);
+    db_exec('UPDATE sap_cl00 SET cl_deb = ? WHERE cl_ide = ?', 'si', [$deuda, $clienteId]);
 }
 function debt_of($clienteId) {
-    return (int) db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$clienteId])['cl_deb'];
+    return deuda_of($clienteId);
 }
 // Congre's cliente of section 3 was deleted in section 5: create a fresh one
 $pagoClName = MARKER . 'pagocli_' . substr(md5(uniqid('', true)), 0, 6);
@@ -1193,7 +1221,7 @@ check('PUT deuda with formaPago keeps the same response body',
 check('PUT deuda with formaPago stored the payment',
     payments_of($envClId) === [['pg_cli' => $envClId, 'pg_mon' => '300.50', 'pg_fp' => $efectivo, 'pg_emp' => $arizaId]],
     json_encode(payments_of($envClId)));
-check('PUT deuda with formaPago lowered the balance', debt_of($envClId) === 700, (string) debt_of($envClId));
+check('PUT deuda with formaPago lowered the balance by 300.50', debt_of($envClId) === '699.50', (string) debt_of($envClId));
 
 // S4 old app versions send no method: stored as Sin especificar
 expect_status('PUT deuda without formaPago (old app)', 200, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 100], null, $tokA));
@@ -1207,7 +1235,7 @@ expect_status('PUT deuda with a non-numeric formaPago -> 400', 400, http('PUT', 
 expect_status('PUT deuda larger than the balance with formaPago -> 409', 409, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 5000, 'formaPago' => $efectivo], null, $tokA));
 expect_status('Congre PUT deuda of Ariza cliente with formaPago -> 404', 404, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 10, 'formaPago' => $efectivo], null, $tokC));
 check('Rejected payments stored nothing', count(payments_of($envClId)) === $before, json_encode(payments_of($envClId)));
-check('Rejected payments left the balance unchanged', debt_of($envClId) === 600, (string) debt_of($envClId));
+check('Rejected payments left the balance unchanged', debt_of($envClId) === '599.50', (string) debt_of($envClId));
 
 // S5 payment history per client, newest first
 expect_status('PUT deuda with Transferencia', 200, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 50, 'formaPago' => $transferencia], null, $tokA));

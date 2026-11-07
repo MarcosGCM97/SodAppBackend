@@ -76,6 +76,11 @@ Clientes: localidad y coordenadas (migración 009)
 - `POST` acepta opcionales `localidadCl`, `latitudCl`, `longitudCl`. `PUT` acepta opcionales `cl_loc`, `cl_lat`, `cl_lng`: una clave que no se envía deja el valor como está (versiones viejas de la app); `null` lo borra.
 - Latitud y longitud van siempre juntas, en grados (-90..90, -180..180); si no, 400. Localidad: hasta 100 caracteres.
 
+Deuda con centavos (migración 010)
+----------------------------------
+- `cl_deb` es `DECIMAL(12,2)`: las ventas, los pagos y las ventas borradas con `revertir_deuda` mueven el monto exacto, sin redondear a enteros. Las lecturas devuelven `cl_deb` con dos decimales (`"4500.00"`).
+- `PUT deudaCliente.php` redondea `deuda` a centavos; un monto que queda en 0.00 responde 400 "La deuda debe ser mayor a 0".
+
 Ruta (api/ruta.php)
 -------------------
 Requiere token. Módulo aislado: solo lee repartos, paradas y clientes; es dueño de la planta (`sap_pl00`) y de los horarios del recorrido (`rp_ini`, `rp_fin`).
