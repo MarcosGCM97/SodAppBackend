@@ -30,6 +30,11 @@ class Database {
       }
       
       $con->query('SET NAMES utf8');
+
+      // MySQL dates (NOW(), DEFAULT CURRENT_TIMESTAMP such as pg_fec) must use the same
+      // clock as PHP dates (vt_fec), whatever timezone the MySQL server runs on.
+      // date('P') is generated here ("-03:00"), never user input.
+      $con->query("SET time_zone = '" . date('P') . "'");
       return $con;
    }
 }

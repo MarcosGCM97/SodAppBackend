@@ -139,3 +139,13 @@ Admin API (owner only):
 - `PUT usuarios.php` `{"id","rol"?,"contrasena"?,"activo"?}` -> `{"success":true}`. 404 user not in the company; 400 when the target is the owner, nothing to change or invalid data.
 - `GET roles.php` -> `{"success":true,"roles":[{"ro_ide","ro_nom","permisos":[codes],"usuarios":N}],"permisos_disponibles":[{"pm_cod","pm_des"}]}`.
 - `POST roles.php` `{"nombre","permisos":[codes]}` -> 201 `{"success":true,"ro_ide":N}`; `PUT roles.php` `{"id","nombre","permisos"}` replaces name and permissions; `DELETE roles.php?id=N`. 400 name not 1-50 characters or unknown code; 404 role not in the company; 409 duplicate name in the company, or (DELETE) users still have the role. Writes run in one transaction.
+
+Reporte de ventas y cobros (api/reporte.php)
+--------------------------------------------
+Requiere token. Solo lectura. Reemplaza en la app a `cajaMes.php` y `pagos.php?mes=`, que siguen iguales para versiones viejas de la app.
+
+- `GET ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD`: rango inclusivo de hasta 366 días. Opcionales `compDesde` y `compHasta` (van juntos) para el período de comparación; si faltan, se usa la misma cantidad de días inmediatamente anterior. 400 ante fechas inválidas, `desde` > `hasta` o un rango más largo.
+- Responde `{"desde","hasta","resumen":{"vendido","cobrado","diferencia","ventas","clientes","lineasEstimadas"},"anterior":{"desde","hasta","vendido","cobrado","ventas"},"cobros":[{"forma","total"}],"productos":[{"producto","cantidad","monto"}],"clientes":[{"clienteId","cliente","ventas","monto"}],"dias":[{"fecha","monto"}],"detalle":[{"fecha","clienteId","cliente","producto","cantidad","monto","estimado"}],"primerCobro"}`.
+- Montos: el guardado en la venta (`vt_mon`). Las líneas viejas sin monto guardado se valoran al precio actual del producto y se marcan `estimado` (contadas en `lineasEstimadas`).
+- Una venta es un registro: las líneas con el mismo cliente y fecha/hora. `cobrado` suma los pagos (`sap_pg00`) del rango; `primerCobro` es el primer pago registrado del usuario (antes de la migración 007 los pagos no se guardaban).
+- Fechas: la conexión fija la zona horaria de MySQL igual a la de PHP (Argentina), así `pg_fec` y `vt_fec` usan el mismo reloj.
