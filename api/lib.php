@@ -117,11 +117,11 @@ function parse_texto_opcional($value, $max) {
 // Call it right after changing pr_stk, inside the same transaction: ms_stk takes the
 // stock that the change left. $tipo: venta, venta_eliminada, llenado, ajuste, alta.
 // Returns false when the insert fails, so the caller can roll back.
-function record_stock_movement($con, $userId, $nombre, $tipo, $cantidad, $ventaId = null) {
+function record_stock_movement($con, $companyId, $nombre, $tipo, $cantidad, $ventaId = null) {
     $stmt = prepare_or_fail($con, 'INSERT INTO sap_ms00 (ms_pro, ms_emp, ms_tip, ms_can, ms_stk, ms_vta, ms_fec)
         SELECT pr_ide, pr_emp, ?, ?, COALESCE(pr_stk, 0), ?, NOW() FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ?');
 
-    mysqli_stmt_bind_param($stmt, 'siisi', $tipo, $cantidad, $ventaId, $nombre, $userId);
+    mysqli_stmt_bind_param($stmt, 'siisi', $tipo, $cantidad, $ventaId, $nombre, $companyId);
 
     return mysqli_stmt_execute($stmt);
 }
@@ -132,11 +132,11 @@ function record_stock_movement($con, $userId, $nombre, $tipo, $cantidad, $ventaI
 // The caller owns the transaction: call it after mysqli_autocommit($con, false) and commit after.
 // On invalid input it rolls back and sends 404 (cliente/producto) or 400 (line) like POST ventas.
 // Returns the created sale ids, in line order.
-function registrar_venta_lineas($con, $userId, $clienteId, $lineas, $fecha) {
+function registrar_venta_lineas($con, $companyId, $clienteId, $lineas, $fecha) {
     // Validar que el cliente existe, no está eliminado y pertenece al usuario
     $stmtValidateClient = prepare_or_fail($con, 'SELECT cl_ide FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ? AND is_deleted = 0');
 
-    mysqli_stmt_bind_param($stmtValidateClient, 'ii', $clienteId, $userId);
+    mysqli_stmt_bind_param($stmtValidateClient, 'ii', $clienteId, $companyId);
 
     mysqli_stmt_execute($stmtValidateClient);
 
@@ -159,7 +159,7 @@ function registrar_venta_lineas($con, $userId, $clienteId, $lineas, $fecha) {
 
         if (!$nombre) continue; // reported as an invalid product below
 
-        mysqli_stmt_bind_param($stmtValidateProduct, 'si', $nombre, $userId);
+        mysqli_stmt_bind_param($stmtValidateProduct, 'si', $nombre, $companyId);
 
         mysqli_stmt_execute($stmtValidateProduct);
 
@@ -227,7 +227,7 @@ function registrar_venta_lineas($con, $userId, $clienteId, $lineas, $fecha) {
 
         $vtDev = $retornable ? $devueltos : null;
 
-        mysqli_stmt_bind_param($stmtInsert, 'isiisdi', $clienteId, $nombre, $cantidad, $userId, $fecha, $monto, $vtDev);
+        mysqli_stmt_bind_param($stmtInsert, 'isiisdi', $clienteId, $nombre, $cantidad, $companyId, $fecha, $monto, $vtDev);
 
         if (!mysqli_stmt_execute($stmtInsert)) {
             mysqli_rollback($con);
@@ -240,7 +240,7 @@ function registrar_venta_lineas($con, $userId, $clienteId, $lineas, $fecha) {
         $ventaIds[] = $ventaId;
 
         // descontar stock del producto
-        mysqli_stmt_bind_param($stmtDecrementStock, 'isi', $cantidad, $nombre, $userId);
+        mysqli_stmt_bind_param($stmtDecrementStock, 'isi', $cantidad, $nombre, $companyId);
 
         if (!mysqli_stmt_execute($stmtDecrementStock)) {
             mysqli_rollback($con);
@@ -248,14 +248,14 @@ function registrar_venta_lineas($con, $userId, $clienteId, $lineas, $fecha) {
             send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtDecrementStock)],500);
         }
 
-        if (!record_stock_movement($con, $userId, $nombre, 'venta', -$cantidad, $ventaId)) {
+        if (!record_stock_movement($con, $companyId, $nombre, 'venta', -$cantidad, $ventaId)) {
             mysqli_rollback($con);
 
             send_json(["success"=>false,"error"=>mysqli_error($con)],500);
         }
 
         if ($retornable) {
-            mysqli_stmt_bind_param($stmtAddEmpties, 'isi', $devueltos, $nombre, $userId);
+            mysqli_stmt_bind_param($stmtAddEmpties, 'isi', $devueltos, $nombre, $companyId);
 
             if (!mysqli_stmt_execute($stmtAddEmpties)) {
                 mysqli_rollback($con);
@@ -267,7 +267,7 @@ function registrar_venta_lineas($con, $userId, $clienteId, $lineas, $fecha) {
 
             $saldo = $cantidad - $devueltos;
 
-            mysqli_stmt_bind_param($stmtAddBalance, 'iiii', $clienteId, $productoId, $saldo, $userId);
+            mysqli_stmt_bind_param($stmtAddBalance, 'iiii', $clienteId, $productoId, $saldo, $companyId);
 
             if (!mysqli_stmt_execute($stmtAddBalance)) {
                 mysqli_rollback($con);
@@ -277,7 +277,7 @@ function registrar_venta_lineas($con, $userId, $clienteId, $lineas, $fecha) {
         }
 
         // actualizar deuda del cliente
-        mysqli_stmt_bind_param($stmtAddDebt, 'dii', $monto, $clienteId, $userId);
+        mysqli_stmt_bind_param($stmtAddDebt, 'dii', $monto, $clienteId, $companyId);
 
         if (!mysqli_stmt_execute($stmtAddDebt)) {
             mysqli_rollback($con);

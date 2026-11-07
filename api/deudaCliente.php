@@ -4,19 +4,20 @@ require_once __DIR__ . '/auth.php';
 
 allow_cors();
 
-// Every method requires a valid token; the owner always comes from it
-$userId = current_user_id();
+// Every method requires a valid token; the company (owner id) always comes from it
+$companyId = current_company_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
 //GET /api/deuda.php?id=1
 if ($method === 'GET') {
+    require_permission('cobros.ver');
     $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
 
     // If id provided, return single debtor
     if ($id > 0) {
         $stmt = prepare_or_fail($con, 'SELECT cl_ide, cl_nom, cl_deb FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ? AND is_deleted = 0');
-        mysqli_stmt_bind_param($stmt, 'ii', $id, $userId);
+        mysqli_stmt_bind_param($stmt, 'ii', $id, $companyId);
         mysqli_stmt_execute($stmt);
         $res = mysqli_stmt_get_result($stmt);
         $row = mysqli_fetch_assoc($res);
@@ -25,8 +26,8 @@ if ($method === 'GET') {
     }
 
     // Otherwise list debtors
-    // $userId is an int from the token; plain query keeps the string-typed JSON of this list
-    $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_deb FROM sap_cl00 WHERE cl_emp = ' . intval($userId) . ' AND cl_deb > 0 AND is_deleted = 0');
+    // $companyId is an int from the token; plain query keeps the string-typed JSON of this list
+    $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_deb FROM sap_cl00 WHERE cl_emp = ' . intval($companyId) . ' AND cl_deb > 0 AND is_deleted = 0');
     if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
     $arr = [];
@@ -36,6 +37,7 @@ if ($method === 'GET') {
 }
 
 if ($method === "PUT") {
+    require_permission('cobros.cargar');
     // The Android app sends ?id=..&deuda=.. as query params; other clients may send a JSON body
     $data = isset($_GET['id']) ? $_GET : get_json_input();
 
@@ -67,7 +69,7 @@ if ($method === "PUT") {
 
     // The cliente must belong to the token user
     $check = prepare_or_fail($con, 'SELECT 1 FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ? AND is_deleted = 0');
-    mysqli_stmt_bind_param($check, 'ii', $id, $userId);
+    mysqli_stmt_bind_param($check, 'ii', $id, $companyId);
     mysqli_stmt_execute($check);
     $resCheck = mysqli_stmt_get_result($check);
     if (!$resCheck || mysqli_num_rows($resCheck) === 0) {
@@ -88,7 +90,7 @@ if ($method === "PUT") {
 
     $stmt = prepare_or_fail($con, $queryUpdateDeuda);
 
-    mysqli_stmt_bind_param($stmt, 'diid', $totalDeuda, $id, $userId, $totalDeuda);
+    mysqli_stmt_bind_param($stmt, 'diid', $totalDeuda, $id, $companyId, $totalDeuda);
 
     if (mysqli_stmt_execute($stmt)) {
         if ($stmt->affected_rows === 0) {
@@ -101,7 +103,7 @@ if ($method === "PUT") {
         }
 
         $stmtPago = prepare_or_fail($con, 'INSERT INTO sap_pg00 (pg_cli, pg_mon, pg_fp, pg_emp) VALUES (?, ?, ?, ?)');
-        mysqli_stmt_bind_param($stmtPago, 'idii', $id, $totalDeuda, $formaPago, $userId);
+        mysqli_stmt_bind_param($stmtPago, 'idii', $id, $totalDeuda, $formaPago, $companyId);
 
         if (!mysqli_stmt_execute($stmtPago) || !mysqli_commit($con)) {
             mysqli_rollback($con);
