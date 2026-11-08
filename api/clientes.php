@@ -4,13 +4,15 @@ require_once __DIR__ . '/auth.php';
 
 allow_cors();
 
-// Every method requires a valid token; the owner always comes from it
-$userId = current_user_id();
+// Every method requires a valid token; the company (owner id) always comes from it
+$companyId = current_company_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
 // GET /api/clientes.php or /api/clientes.php?id=1
 if ($method === 'GET') {
+    // also read by the ventas, repartos and cobros screens
+    require_permission(['clientes.ver', 'ventas.ver', 'ventas.cargar', 'repartos.ver', 'repartos.gestionar', 'cobros.ver']);
 
     if (isset($_GET['id']) && intval($_GET['id']) > 0) {
 
@@ -18,7 +20,7 @@ if ($method === 'GET') {
 
         $stmt = prepare_or_fail($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp, cl_loc, cl_lat, cl_lng FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ? AND is_deleted = 0');
 
-        mysqli_stmt_bind_param($stmt, 'ii', $id, $userId);
+        mysqli_stmt_bind_param($stmt, 'ii', $id, $companyId);
 
         mysqli_stmt_execute($stmt);
 
@@ -30,8 +32,8 @@ if ($method === 'GET') {
 
         send_json(["success" => false, "error" => "Cliente no encontrado"], 404);
     } else {
-        // $userId is an int from the token; plain query keeps the string-typed JSON of this list
-        $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp, cl_loc, cl_lat, cl_lng FROM sap_cl00 WHERE cl_emp = ' . intval($userId) . ' AND is_deleted = 0 ORDER BY cl_nom');
+        // $companyId is an int from the token; plain query keeps the string-typed JSON of this list
+        $res = mysqli_query($con, 'SELECT cl_ide, cl_nom, cl_dir, cl_tel, cl_deb, cl_emp, cl_loc, cl_lat, cl_lng FROM sap_cl00 WHERE cl_emp = ' . intval($companyId) . ' AND is_deleted = 0 ORDER BY cl_nom');
 
         if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
@@ -45,6 +47,7 @@ if ($method === 'GET') {
 
 // POST: crear cliente. JSON: {"nombreCl":"...","numTelCl":"...","direccionCl":"..."}
 if ($method === 'POST') {
+    require_permission('clientes.editar');
     $data = get_json_input();
 
     $nombre = isset($data['nombreCl']) ? $data['nombreCl'] : (isset($data['name']) ? $data['name'] : null);
@@ -68,7 +71,7 @@ if ($method === 'POST') {
 
     $stmt = prepare_or_fail($con, 'INSERT INTO sap_cl00 SET cl_nom = ?, cl_tel = ?, cl_dir = ?, cl_emp = ?, cl_loc = ?, cl_lat = ?, cl_lng = ?');
 
-    mysqli_stmt_bind_param($stmt, 'sssisdd', $nombre, $tel, $dir, $userId, $loc, $lat, $lng);
+    mysqli_stmt_bind_param($stmt, 'sssisdd', $nombre, $tel, $dir, $companyId, $loc, $lat, $lng);
 
     if (mysqli_stmt_execute($stmt)) {
         send_json(["success" => true, "message" => "Cliente creado", "id" => mysqli_insert_id($con)], 201);
@@ -79,6 +82,7 @@ if ($method === 'POST') {
 
 // PUT: actualizar cliente (body JSON with id and fields)
 if ($method === 'PUT') {
+    require_permission('clientes.editar');
     $data = get_json_input();
 
     $id = isset($data['cl_ide']) ? intval($data['cl_ide']) : 0;
@@ -124,7 +128,7 @@ if ($method === 'PUT') {
     // Ownership check first: an UPDATE with unchanged values affects 0 rows
     $check = prepare_or_fail($con, 'SELECT 1 FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ?');
 
-    mysqli_stmt_bind_param($check, 'ii', $id, $userId);
+    mysqli_stmt_bind_param($check, 'ii', $id, $companyId);
 
     mysqli_stmt_execute($check);
 
@@ -136,7 +140,7 @@ if ($method === 'PUT') {
 
     $types .= 'ii';
     $params[] = $id;
-    $params[] = $userId;
+    $params[] = $companyId;
 
     mysqli_stmt_bind_param($stmt, $types, ...$params);
 
@@ -149,13 +153,14 @@ if ($method === 'PUT') {
 
 // DELETE: /api/clients.php?id=1 (Soft Delete)
 if ($method === 'DELETE') {
+    require_permission('clientes.editar');
     $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
 
     if ($id <= 0) send_json(["success" => false, "error" => "ID inválido"], 400);
 
     $stmt = prepare_or_fail($con, 'UPDATE sap_cl00 SET is_deleted = 1 WHERE cl_ide = ? AND cl_emp = ?');
 
-    mysqli_stmt_bind_param($stmt, 'ii', $id, $userId);
+    mysqli_stmt_bind_param($stmt, 'ii', $id, $companyId);
 
     if (mysqli_stmt_execute($stmt)) {
         if ($stmt->affected_rows > 0) send_json(["success" => true, "message" => "Cliente eliminado"]);

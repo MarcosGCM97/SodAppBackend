@@ -4,8 +4,8 @@ require_once __DIR__ . '/auth.php';
 
 allow_cors();
 
-// Every method requires a valid token; the owner always comes from it
-$userId = current_user_id();
+// Every method requires a valid token; the company (owner id) always comes from it
+$companyId = current_company_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
@@ -15,6 +15,8 @@ if ($method !== "GET") {
         "error" => 'Metodo no permitido'
     ], 405);
 }
+
+require_permission('caja.ver');
 
 // Validate month (1..12) before formatting it
 $mesRaw = (isset($_GET['mes']) && is_string($_GET['mes'])) ? trim($_GET['mes']) : '';
@@ -67,7 +69,7 @@ $query = 'SELECT cl.cl_nom, cl.cl_dir, cl.cl_tel,
 
 $stmt = prepare_or_fail($con, $query);
 
-mysqli_stmt_bind_param($stmt, 'iss', $userId, $desde, $hasta);
+mysqli_stmt_bind_param($stmt, 'iss', $companyId, $desde, $hasta);
 
 if (!mysqli_stmt_execute($stmt)) {
     send_json([

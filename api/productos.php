@@ -3,12 +3,14 @@ require_once __DIR__ . '/lib.php';
 require_once __DIR__ . '/auth.php';
 allow_cors();
 
-// Every method requires a valid token; the owner always comes from it
-$userId = current_user_id();
+// Every method requires a valid token; the company (owner id) always comes from it
+$companyId = current_company_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
 if ($method === 'GET') {
+    // also read while loading a sale, a reparto or a client's debt
+    require_permission(['stock.ver', 'ventas.ver', 'ventas.cargar', 'repartos.ver', 'repartos.gestionar', 'cobros.ver']);
     // pr_cli: containers held by the owner's non-deleted clientes (sum of their balances)
     $selectProducto = 'SELECT p.*, (SELECT COALESCE(SUM(ce.ce_can), 0) FROM sap_ce00 ce
             JOIN sap_cl00 c ON c.cl_ide = ce.ce_cli AND c.is_deleted = 0
@@ -21,7 +23,7 @@ if ($method === 'GET') {
 
         $stmt = prepare_or_fail($con, $selectProducto . ' AND p.pr_nom = ? AND p.pr_emp = ?');
 
-        mysqli_stmt_bind_param($stmt, 'si', $nombre, $userId);
+        mysqli_stmt_bind_param($stmt, 'si', $nombre, $companyId);
 
         mysqli_stmt_execute($stmt);
 
@@ -33,8 +35,8 @@ if ($method === 'GET') {
 
         send_json(["success" => false, "error" => "Producto no encontrado"], 404);
     } else {
-        // $userId is an int from the token; plain query keeps the string-typed JSON of this list
-        $res = mysqli_query($con, $selectProducto . ' AND p.pr_emp = ' . intval($userId));
+        // $companyId is an int from the token; plain query keeps the string-typed JSON of this list
+        $res = mysqli_query($con, $selectProducto . ' AND p.pr_emp = ' . intval($companyId));
 
         if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
@@ -47,6 +49,7 @@ if ($method === 'GET') {
 }
 
 if ($method === 'POST') {
+    require_permission('stock.editar');
     $data = get_json_input();
 
     $nombre = isset($data['nombrePr']) ? $data['nombrePr'] : (isset($data['name']) ? $data['name'] : null);
@@ -69,7 +72,7 @@ if ($method === 'POST') {
     // check exists (names are unique per owner: uq_pr_emp_nom)
     $check = prepare_or_fail($con, 'SELECT 1 FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ?');
 
-    mysqli_stmt_bind_param($check, 'si', $nombre, $userId);
+    mysqli_stmt_bind_param($check, 'si', $nombre, $companyId);
 
     mysqli_stmt_execute($check);
 
@@ -79,7 +82,7 @@ if ($method === 'POST') {
 
     $stmt = prepare_or_fail($con, 'INSERT INTO sap_pr00 SET pr_nom = ?, pr_val = ?, pr_stk = ?, pr_emp = ?, pr_ret = ?, pr_vac = ?, created_at = CURDATE()');
 
-    mysqli_stmt_bind_param($stmt, 'sdiiii', $nombre, $precio, $cantidad, $userId, $retornable, $vacios);
+    mysqli_stmt_bind_param($stmt, 'sdiiii', $nombre, $precio, $cantidad, $companyId, $retornable, $vacios);
 
     // The product and its "alta" movement are saved together
     mysqli_autocommit($con, false);
@@ -95,7 +98,7 @@ if ($method === 'POST') {
 
     $productoId = mysqli_insert_id($con);
 
-    if (!record_stock_movement($con, $userId, $nombre, 'alta', intval($cantidad)) || !mysqli_commit($con)) {
+    if (!record_stock_movement($con, $companyId, $nombre, 'alta', intval($cantidad)) || !mysqli_commit($con)) {
         mysqli_rollback($con);
 
         send_json(["success"=>false,"error"=>mysqli_error($con)],500);
@@ -106,6 +109,7 @@ if ($method === 'POST') {
 }
 
 if ($method === 'PUT') {
+    require_permission('stock.editar');
     $nombre = isset($_GET['nombre']) ? $_GET['nombre'] : null;
 
     $precio = isset($_GET['precio']) ? $_GET['precio'] : null;
@@ -130,7 +134,7 @@ if ($method === 'PUT') {
     // keeps the previous stock valid until the movement is recorded
     $check = prepare_or_fail($con, 'SELECT COALESCE(pr_stk, 0) AS pr_stk FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ? AND deleted_at IS NULL FOR UPDATE');
 
-    mysqli_stmt_bind_param($check, 'si', $nombre, $userId);
+    mysqli_stmt_bind_param($check, 'si', $nombre, $companyId);
 
     mysqli_stmt_execute($check);
 
@@ -168,7 +172,7 @@ if ($method === 'PUT') {
 
     $params[] = $nombre;
 
-    $params[] = $userId;
+    $params[] = $companyId;
 
     mysqli_stmt_bind_param($stmt, $types, ...$params);
 
@@ -183,7 +187,7 @@ if ($method === 'PUT') {
     // Only a stock change is a movement: price or container edits record nothing
     $diferencia = intval($cantidad) - intval($actual['pr_stk']);
 
-    if ($diferencia !== 0 && !record_stock_movement($con, $userId, $nombre, 'ajuste', $diferencia)) {
+    if ($diferencia !== 0 && !record_stock_movement($con, $companyId, $nombre, 'ajuste', $diferencia)) {
         mysqli_rollback($con);
 
         send_json(["success"=>false,"error"=>mysqli_error($con)],500);
@@ -200,13 +204,14 @@ if ($method === 'PUT') {
 }
 
 if ($method === 'DELETE') {
+    require_permission('stock.editar');
     $nombre = isset($_GET['nombre']) ? $_GET['nombre'] : '';
 
     if ($nombre === '') send_json(["success"=>false,"error"=>"Nombre requerido"],400);
 
     $stmt = prepare_or_fail($con, 'UPDATE sap_pr00 SET deleted_at = CURDATE() WHERE pr_nom = ? AND pr_emp = ?');
 
-    mysqli_stmt_bind_param($stmt, 'si', $nombre, $userId);
+    mysqli_stmt_bind_param($stmt, 'si', $nombre, $companyId);
 
     if (mysqli_stmt_execute($stmt)) {
         if (mysqli_stmt_affected_rows($stmt) > 0) {

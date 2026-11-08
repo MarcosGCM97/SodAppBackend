@@ -23,8 +23,8 @@ allow_cors();
 //   finalizar      {"repartoId"}: sets rp_fin to now. 409 when the trip was not started, a stop
 //                  is still pendiente, or it was already finished.
 
-// Every method requires a valid token; the owner always comes from it
-$userId = current_user_id();
+// Every method requires a valid token; the company (owner id) always comes from it
+$companyId = current_company_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
@@ -40,9 +40,9 @@ function ruta_numero_o_null($value) {
     return $value === null ? null : (float) $value;
 }
 
-function ruta_planta($con, $userId) {
+function ruta_planta($con, $companyId) {
     $stmt = prepare_or_fail($con, 'SELECT pl_dir, pl_loc, pl_lat, pl_lng FROM sap_pl00 WHERE pl_emp = ?');
-    mysqli_stmt_bind_param($stmt, 'i', $userId);
+    mysqli_stmt_bind_param($stmt, 'i', $companyId);
     $rows = ruta_fetch_all($stmt);
     if (!$rows) return null;
     return [
@@ -54,27 +54,28 @@ function ruta_planta($con, $userId) {
 }
 
 // Dated reparto of the owner (templates have rp_fec NULL), or null
-function ruta_reparto($con, $userId, $repartoId) {
+function ruta_reparto($con, $companyId, $repartoId) {
     $stmt = prepare_or_fail($con, 'SELECT rp_ide, rp_fec, rp_ini, rp_fin FROM sap_rp00
         WHERE rp_ide = ? AND rp_emp = ? AND rp_fec IS NOT NULL');
-    mysqli_stmt_bind_param($stmt, 'ii', $repartoId, $userId);
+    mysqli_stmt_bind_param($stmt, 'ii', $repartoId, $companyId);
     $rows = ruta_fetch_all($stmt);
     return $rows ? $rows[0] : null;
 }
 
-function ruta_reparto_o_404($con, $userId, $value) {
+function ruta_reparto_o_404($con, $companyId, $value) {
     $repartoId = parse_non_negative_int($value);
-    $reparto = $repartoId ? ruta_reparto($con, $userId, $repartoId) : null;
+    $reparto = $repartoId ? ruta_reparto($con, $companyId, $repartoId) : null;
     if (!$reparto) send_json(["success" => false, "error" => "Reparto no encontrado"], 404);
     return $reparto;
 }
 
 if ($method === 'GET') {
+    require_permission('repartos.ver');
     if (!isset($_GET['repartoId'])) {
-        send_json(["success" => true, "planta" => ruta_planta($con, $userId)]);
+        send_json(["success" => true, "planta" => ruta_planta($con, $companyId)]);
     }
 
-    $reparto = ruta_reparto_o_404($con, $userId, $_GET['repartoId']);
+    $reparto = ruta_reparto_o_404($con, $companyId, $_GET['repartoId']);
     $repartoId = (int) $reparto['rp_ide'];
 
     $stmt = prepare_or_fail($con, 'SELECT s.rs_ide, s.rs_est, c.cl_ide, c.cl_nom, c.cl_dir, c.cl_loc, c.cl_lat, c.cl_lng
@@ -100,12 +101,13 @@ if ($method === 'GET') {
         'fecha' => $reparto['rp_fec'],
         'inicio' => $reparto['rp_ini'],
         'fin' => $reparto['rp_fin'],
-        'planta' => ruta_planta($con, $userId),
+        'planta' => ruta_planta($con, $companyId),
         'paradas' => $paradas,
     ]]);
 }
 
 if ($method === 'POST') {
+    require_permission('repartos.gestionar');
     $data = get_json_input();
     if (!is_array($data)) $data = [];
     $accion = isset($data['accion']) ? $data['accion'] : null;
@@ -121,14 +123,14 @@ if ($method === 'POST') {
 
         $stmt = prepare_or_fail($con, 'INSERT INTO sap_pl00 (pl_emp, pl_dir, pl_loc, pl_lat, pl_lng) VALUES (?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE pl_dir = VALUES(pl_dir), pl_loc = VALUES(pl_loc), pl_lat = VALUES(pl_lat), pl_lng = VALUES(pl_lng)');
-        mysqli_stmt_bind_param($stmt, 'issdd', $userId, $dir, $loc, $lat, $lng);
+        mysqli_stmt_bind_param($stmt, 'issdd', $companyId, $dir, $loc, $lat, $lng);
         if (!mysqli_stmt_execute($stmt)) send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
 
-        send_json(["success" => true, "planta" => ruta_planta($con, $userId)]);
+        send_json(["success" => true, "planta" => ruta_planta($con, $companyId)]);
     }
 
     if ($accion === 'iniciar') {
-        $reparto = ruta_reparto_o_404($con, $userId, isset($data['repartoId']) ? $data['repartoId'] : null);
+        $reparto = ruta_reparto_o_404($con, $companyId, isset($data['repartoId']) ? $data['repartoId'] : null);
         $repartoId = (int) $reparto['rp_ide'];
         $ahora = date('Y-m-d H:i:s');
 
@@ -137,12 +139,12 @@ if ($method === 'POST') {
         mysqli_stmt_bind_param($stmt, 'si', $ahora, $repartoId);
         if (!mysqli_stmt_execute($stmt)) send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
 
-        $reparto = ruta_reparto($con, $userId, $repartoId);
+        $reparto = ruta_reparto($con, $companyId, $repartoId);
         send_json(["success" => true, "inicio" => $reparto['rp_ini']]);
     }
 
     if ($accion === 'finalizar') {
-        $reparto = ruta_reparto_o_404($con, $userId, isset($data['repartoId']) ? $data['repartoId'] : null);
+        $reparto = ruta_reparto_o_404($con, $companyId, isset($data['repartoId']) ? $data['repartoId'] : null);
         $repartoId = (int) $reparto['rp_ide'];
 
         if ($reparto['rp_ini'] === null) send_json(["success" => false, "error" => "El recorrido no fue iniciado"], 409);
@@ -157,12 +159,12 @@ if ($method === 'POST') {
         if (!mysqli_stmt_execute($stmt)) send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
 
         if (mysqli_stmt_affected_rows($stmt) === 0) {
-            $reparto = ruta_reparto($con, $userId, $repartoId);
+            $reparto = ruta_reparto($con, $companyId, $repartoId);
             $error = $reparto['rp_fin'] !== null ? 'El recorrido ya fue finalizado' : 'Quedan paradas pendientes';
             send_json(["success" => false, "error" => $error], 409);
         }
 
-        $reparto = ruta_reparto($con, $userId, $repartoId);
+        $reparto = ruta_reparto($con, $companyId, $repartoId);
         send_json(["success" => true, "inicio" => $reparto['rp_ini'], "fin" => $reparto['rp_fin']]);
     }
 

@@ -4,8 +4,8 @@ require_once __DIR__ . '/auth.php';
 
 allow_cors();
 
-// Every method requires a valid token; the owner always comes from it
-$userId = current_user_id();
+// Every method requires a valid token; the company (owner id) always comes from it
+$companyId = current_company_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
@@ -32,6 +32,8 @@ function execute_or_rollback($con, $stmt) {
 
 // GET /api/days.php or /api/days.php?id=1
 if ($method === 'GET') {
+    // delivery days are reference data of the clientes, ventas and repartos screens
+    require_permission(['clientes.ver', 'ventas.ver', 'ventas.cargar', 'repartos.ver', 'repartos.gestionar']);
 
     if (isset($_GET['id']) && intval($_GET['id']) > 0) {
 
@@ -44,7 +46,7 @@ if ($method === 'GET') {
             WHERE cl.cl_ide = ? AND cl.cl_emp = ? AND cl.is_deleted = 0
             ORDER BY d.di_ide');
 
-        mysqli_stmt_bind_param($stmt, 'ii', $id, $userId);
+        mysqli_stmt_bind_param($stmt, 'ii', $id, $companyId);
 
         mysqli_stmt_execute($stmt);
 
@@ -68,7 +70,7 @@ if ($method === 'GET') {
             WHERE cl.cl_emp = ? AND cl.is_deleted = 0
             ORDER BY cl.cl_ide, d.di_ide');
 
-        mysqli_stmt_bind_param($stmt, 'i', $userId);
+        mysqli_stmt_bind_param($stmt, 'i', $companyId);
 
         if (!mysqli_stmt_execute($stmt)) send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
 
@@ -97,6 +99,7 @@ if ($method === 'GET') {
 }
 
 if ($method === 'PUT') {
+    require_permission('clientes.editar');
     $data = get_json_input();
 
     // Android sends the cliente id as 'cl_ide'
@@ -108,7 +111,7 @@ if ($method === 'PUT') {
 
     // The cliente must belong to the token user and not be soft-deleted
     $check = prepare_or_fail($con, 'SELECT 1 FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ? AND is_deleted = 0');
-    mysqli_stmt_bind_param($check, 'ii', $id, $userId);
+    mysqli_stmt_bind_param($check, 'ii', $id, $companyId);
     mysqli_stmt_execute($check);
     $resCheck = mysqli_stmt_get_result($check);
     if (!$resCheck || mysqli_num_rows($resCheck) === 0) {
@@ -154,7 +157,7 @@ if ($method === 'PUT') {
         $flags['cl_sab'],
         $flags['cl_dom'],
         $id,
-        $userId
+        $companyId
     );
 
     // All writes succeed together or the previous days stay intact
