@@ -38,10 +38,9 @@ function user_permissions($con, $user) {
     $rol = intval($user['us_rol']);
     $emp = intval($user['us_emp']);
     mysqli_stmt_bind_param($stmt, 'ii', $rol, $emp);
-    mysqli_stmt_execute($stmt);
-    $res = mysqli_stmt_get_result($stmt);
+    $res = execute_or_fail($con, $stmt);
     $codes = [];
-    while ($res && ($r = mysqli_fetch_assoc($res))) $codes[] = $r['pm_cod'];
+    while ($r = mysqli_fetch_assoc($res)) $codes[] = $r['pm_cod'];
     return $codes;
 }
 
@@ -62,9 +61,7 @@ function auth_user() {
     $con = $GLOBALS['con'];
     $stmt = prepare_or_fail($con, 'SELECT us_ide, us_nom, us_emp, us_rol, us_act FROM sap_us00 WHERE us_ide = ?');
     mysqli_stmt_bind_param($stmt, 'i', $id);
-    mysqli_stmt_execute($stmt);
-    $res = mysqli_stmt_get_result($stmt);
-    $row = $res ? mysqli_fetch_assoc($res) : null;
+    $row = mysqli_fetch_assoc(execute_or_fail($con, $stmt));
     if (!$row || intval($row['us_act']) !== 1) {
         send_json(["success"=>false,"error"=>"Invalid or expired token"], 401);
     }

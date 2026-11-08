@@ -71,6 +71,17 @@ function prepare_or_fail($con, $query) {
     return $stmt;
 }
 
+// Executes a prepared SELECT and returns its result; sends 500 on a database failure, so a
+// transient fault (lock timeout, dropped connection) is never mistaken for an empty result.
+function execute_or_fail($con, $stmt) {
+    $res = mysqli_stmt_execute($stmt) ? mysqli_stmt_get_result($stmt) : false;
+
+    if ($res === false) {
+        send_json(["success" => false, "error" => mysqli_stmt_error($stmt) ?: mysqli_error($con)], 500);
+    }
+    return $res;
+}
+
 // Integer >= 0 from JSON or a query param (int or digit string); null when invalid (negative, decimal, text)
 function parse_non_negative_int($value) {
     if (is_int($value)) return $value >= 0 ? $value : null;
