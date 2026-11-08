@@ -570,6 +570,28 @@ if ($otherRol) {
     expect_status('PUT role renamed to another role of the company -> 409', 409, http('PUT', 'roles.php', [], ['id' => $rolId, 'nombre' => $otherRol['ro_nom'], 'permisos' => []], $tokA));
 }
 check('Rejected role puts kept the last permissions', array_column(db_rows('SELECT p.pm_cod FROM sap_rm00 m JOIN sap_pm00 p ON p.pm_ide = m.rm_per WHERE m.rm_rol = ?', 'i', [$rolId]), 'pm_cod') === ['ventas.ver']);
+
+echo "\n# Reduced roles: every guarded method rejects a missing permission\n";
+
+// Role with ventas.ver only: no sale loading, no repartos, no ruta
+$vtCount = (int) db_row('SELECT COUNT(*) AS n FROM sap_vt00 WHERE vt_emp = ?', 'i', [$arizaId])['n'];
+$rpCount = (int) db_row('SELECT COUNT(*) AS n FROM sap_rp00 WHERE rp_emp = ?', 'i', [$arizaId])['n'];
+expect_forbidden('ventas.ver only: POST ventas', 'ventas.cargar', http('POST', 'ventas.php', [], ['clienteId' => $targetClId, 'lineas' => []], $tokV));
+expect_forbidden('ventas.ver only: GET repartos', 'repartos.ver', http('GET', 'repartos.php', [], null, $tokV));
+expect_forbidden('ventas.ver only: POST repartos', 'repartos.gestionar', http('POST', 'repartos.php', [], ['accion' => 'crear'], $tokV));
+expect_forbidden('ventas.ver only: GET ruta', 'repartos.ver', http('GET', 'ruta.php', [], null, $tokV));
+expect_forbidden('ventas.ver only: POST ruta', 'repartos.gestionar', http('POST', 'ruta.php', [], ['accion' => 'iniciar'], $tokV));
+check('Forbidden sale and reparto writes created no rows',
+    (int) db_row('SELECT COUNT(*) AS n FROM sap_vt00 WHERE vt_emp = ?', 'i', [$arizaId])['n'] === $vtCount
+    && (int) db_row('SELECT COUNT(*) AS n FROM sap_rp00 WHERE rp_emp = ?', 'i', [$arizaId])['n'] === $rpCount);
+
+// Role with cobros.ver only: the sales of one cliente (debt screen), never the company list
+expect_status('Owner PUT role to cobros.ver only', 200, http('PUT', 'roles.php', [], ['id' => $rolId, 'nombre' => $rolName, 'permisos' => ['cobros.ver']], $tokA));
+expect_status('cobros.ver only: GET ventas of a cliente -> 200', 200, http('GET', 'ventas.php', ['id' => $targetClId, 'usuarioId' => $arizaId], null, $tokV));
+expect_forbidden('cobros.ver only: GET recent ventas', 'ventas.ver', http('GET', 'ventas.php', ['usuarioId' => $arizaId], null, $tokV));
+expect_forbidden('cobros.ver only: GET ventas with id=0', 'ventas.ver', http('GET', 'ventas.php', ['id' => 0, 'usuarioId' => $arizaId], null, $tokV));
+expect_forbidden('cobros.ver only: GET ventas with a non-numeric id', 'ventas.ver', http('GET', 'ventas.php', ['id' => 'abc', 'usuarioId' => $arizaId], null, $tokV));
+
 http('PUT', 'roles.php', [], ['id' => $rolId, 'nombre' => $rolName, 'permisos' => VENDEDOR], $tokA);
 
 // ---------------------------------------------------------------- 9. password change, deactivation, deletion

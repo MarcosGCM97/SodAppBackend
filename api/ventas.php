@@ -15,10 +15,11 @@ $method = $_SERVER['REQUEST_METHOD'];
 // GET: ?usuarioId= recent sales, ?id=&usuarioId= sales of a cliente. Always scoped to the
 // token user: usuarioId is still accepted (it selects the response shape) but never used as owner.
 if ($method === 'GET') {
-    // the sales of one cliente are also shown in its cobros (debt) screen
-    require_permission(isset($_GET['id']) ? ['ventas.ver', 'cobros.ver'] : 'ventas.ver');
     $usuarioId = isset($_GET['usuarioId']) ? $_GET['usuarioId'] : null;
     $clienteId = isset($_GET['id']) && intval($_GET['id'])>0 ? intval($_GET['id']) : null;
+    // The sales of one cliente are also shown in its cobros (debt) screen. The permission
+    // follows the parsed id: an invalid id (0, text) lists the company sales, so it needs ventas.ver.
+    require_permission($clienteId !== null ? ['ventas.ver', 'cobros.ver'] : 'ventas.ver');
 
     // Case 1: Filter by cliente AND usuarioId
     if ($clienteId && $usuarioId) {
