@@ -126,6 +126,7 @@ Endpoint -> permission ("any of" for reference reads that several screens need):
 | `pagos.php` | GET `?clienteId=` | `cobros.ver` |
 | `pagos.php` | GET `?mes=` (caja) | `caja.ver` |
 | `cajaMes.php` | GET | `caja.ver` |
+| `reporte.php` | GET (sales and payments report) | `caja.ver` |
 | `sesion.php` | GET | any valid token of an active user |
 | `usuarios.php`, `roles.php` | every method | owner only (`admin`) |
 
@@ -142,7 +143,7 @@ Admin API (owner only):
 
 Reporte de ventas y cobros (api/reporte.php)
 --------------------------------------------
-Requiere token. Solo lectura. Reemplaza en la app a `cajaMes.php` y `pagos.php?mes=`, que siguen iguales para versiones viejas de la app.
+Requiere token y el permiso `caja.ver` (reemplaza a la pantalla de caja). Datos de la empresa del usuario (`current_company_id()`). Solo lectura. Reemplaza en la app a `cajaMes.php` y `pagos.php?mes=`, que siguen iguales para versiones viejas de la app.
 
 - `GET ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD`: rango inclusivo de hasta 366 días. Opcionales `compDesde` y `compHasta` (van juntos) para el período de comparación; si faltan, se usa la misma cantidad de días inmediatamente anterior. 400 ante fechas inválidas, `desde` > `hasta` o un rango más largo.
 - Responde `{"desde","hasta","resumen":{"vendido","cobrado","diferencia","ventas","clientes","lineasEstimadas"},"anterior":{"desde","hasta","vendido","cobrado","ventas"},"cobros":[{"forma","total"}],"productos":[{"producto","cantidad","monto"}],"clientes":[{"clienteId","cliente","ventas","monto"}],"dias":[{"fecha","monto"}],"detalle":[{"fecha","clienteId","cliente","producto","cantidad","monto","estimado"}],"primerCobro"}`.

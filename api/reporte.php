@@ -4,8 +4,10 @@ require_once __DIR__ . '/auth.php';
 
 allow_cors();
 
-// Every method requires a valid token; the owner always comes from it
-$userId = current_user_id();
+// Every method requires a valid token; rows are scoped by the company of the token user.
+// The report replaces the caja screen (cajaMes.php, pagos.php?mes=), so it needs caja.ver.
+$companyId = current_company_id();
+require_permission('caja.ver');
 
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     send_json(["success" => false, "error" => 'Metodo no permitido'], 405);
@@ -64,9 +66,9 @@ const FROM_VENTAS = 'FROM sap_vt00 AS vt
 // One sale = one registration: every line of a sale shares cliente and timestamp
 const CLAVE_VENTA = 'COALESCE(vt.vt_cli, 0), vt.vt_fec';
 
-function filas($con, $sql, $userId, $rango) {
+function filas($con, $sql, $companyId, $rango) {
     $stmt = prepare_or_fail($con, $sql);
-    mysqli_stmt_bind_param($stmt, 'iss', $userId, $rango[0], $rango[1]);
+    mysqli_stmt_bind_param($stmt, 'iss', $companyId, $rango[0], $rango[1]);
     if (!mysqli_stmt_execute($stmt)) {
         send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
     }
@@ -80,23 +82,23 @@ function dinero($v) {
     return round((float) $v, 2);
 }
 
-function totales_ventas($con, $userId, $rango) {
+function totales_ventas($con, $companyId, $rango) {
     $r = filas($con, 'SELECT COALESCE(SUM(' . MONTO_LINEA . '), 0) AS vendido,
             COUNT(DISTINCT ' . CLAVE_VENTA . ') AS ventas,
             COUNT(DISTINCT vt.vt_cli) AS clientes,
-            COALESCE(SUM(' . ESTIMADA . '), 0) AS estimadas ' . FROM_VENTAS, $userId, $rango)[0];
+            COALESCE(SUM(' . ESTIMADA . '), 0) AS estimadas ' . FROM_VENTAS, $companyId, $rango)[0];
     return [dinero($r['vendido']), (int) $r['ventas'], (int) $r['clientes'], (int) $r['estimadas']];
 }
 
-function total_cobrado($con, $userId, $rango) {
+function total_cobrado($con, $companyId, $rango) {
     $r = filas($con, 'SELECT COALESCE(SUM(pg_mon), 0) AS cobrado FROM sap_pg00
-        WHERE pg_emp = ? AND pg_fec >= ? AND pg_fec < ?', $userId, $rango)[0];
+        WHERE pg_emp = ? AND pg_fec >= ? AND pg_fec < ?', $companyId, $rango)[0];
     return dinero($r['cobrado']);
 }
 
 $rango = limites($desde, $hasta);
-list($vendido, $ventas, $clientes, $estimadas) = totales_ventas($con, $userId, $rango);
-$cobrado = total_cobrado($con, $userId, $rango);
+list($vendido, $ventas, $clientes, $estimadas) = totales_ventas($con, $companyId, $rango);
+$cobrado = total_cobrado($con, $companyId, $rango);
 
 $cobros = array_map(function ($r) {
     return ['forma' => $r['fp_nom'], 'total' => dinero($r['total'])];
@@ -105,12 +107,12 @@ $cobros = array_map(function ($r) {
     JOIN sap_fp00 AS fp ON fp.fp_ide = pg.pg_fp
     WHERE pg.pg_emp = ? AND pg.pg_fec >= ? AND pg.pg_fec < ?
     GROUP BY fp.fp_ide, fp.fp_nom
-    ORDER BY fp.fp_ide', $userId, $rango));
+    ORDER BY fp.fp_ide', $companyId, $rango));
 
 $productos = array_map(function ($r) {
     return ['producto' => $r['producto'], 'cantidad' => (int) $r['cantidad'], 'monto' => dinero($r['monto'])];
 }, filas($con, 'SELECT vt.vt_pro AS producto, SUM(vt.vt_can) AS cantidad, SUM(' . MONTO_LINEA . ') AS monto '
-    . FROM_VENTAS . ' GROUP BY vt.vt_pro ORDER BY monto DESC, producto', $userId, $rango));
+    . FROM_VENTAS . ' GROUP BY vt.vt_pro ORDER BY monto DESC, producto', $companyId, $rango));
 
 $porCliente = array_map(function ($r) {
     return [
@@ -124,12 +126,12 @@ $porCliente = array_map(function ($r) {
     FROM sap_vt00 AS vt
     LEFT JOIN sap_cl00 AS cl ON cl.cl_ide = vt.vt_cli AND cl.cl_emp = vt.vt_emp
     WHERE vt.vt_emp = ? AND vt.vt_fec >= ? AND vt.vt_fec < ?
-    GROUP BY vt.vt_cli ORDER BY monto DESC, cliente', $userId, $rango));
+    GROUP BY vt.vt_cli ORDER BY monto DESC, cliente', $companyId, $rango));
 
 $porDia = array_map(function ($r) {
     return ['fecha' => $r['fecha'], 'monto' => dinero($r['monto'])];
 }, filas($con, 'SELECT DATE_FORMAT(vt.vt_fec, \'%Y-%m-%d\') AS fecha, SUM(' . MONTO_LINEA . ') AS monto '
-    . FROM_VENTAS . ' GROUP BY fecha ORDER BY fecha', $userId, $rango));
+    . FROM_VENTAS . ' GROUP BY fecha ORDER BY fecha', $companyId, $rango));
 
 $detalle = array_map(function ($r) {
     return [
@@ -146,14 +148,14 @@ $detalle = array_map(function ($r) {
     FROM sap_vt00 AS vt
     LEFT JOIN sap_cl00 AS cl ON cl.cl_ide = vt.vt_cli AND cl.cl_emp = vt.vt_emp
     WHERE vt.vt_emp = ? AND vt.vt_fec >= ? AND vt.vt_fec < ?
-    ORDER BY vt.vt_fec, vt.vt_ide', $userId, $rango));
+    ORDER BY vt.vt_fec, vt.vt_ide', $companyId, $rango));
 
 $rangoComp = limites($compDesde, $compHasta);
-list($compVendido, $compVentas) = totales_ventas($con, $userId, $rangoComp);
+list($compVendido, $compVentas) = totales_ventas($con, $companyId, $rangoComp);
 
 // Payments were not recorded before migration 007: periods before this date have no cobros
 $stmt = prepare_or_fail($con, 'SELECT MIN(pg_fec) AS primero FROM sap_pg00 WHERE pg_emp = ?');
-mysqli_stmt_bind_param($stmt, 'i', $userId);
+mysqli_stmt_bind_param($stmt, 'i', $companyId);
 if (!mysqli_stmt_execute($stmt)) {
     send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
 }
@@ -175,7 +177,7 @@ send_json([
         "desde" => $compDesde->format('Y-m-d'),
         "hasta" => $compHasta->format('Y-m-d'),
         "vendido" => $compVendido,
-        "cobrado" => total_cobrado($con, $userId, $rangoComp),
+        "cobrado" => total_cobrado($con, $companyId, $rangoComp),
         "ventas" => $compVentas,
     ],
     "cobros" => $cobros,
