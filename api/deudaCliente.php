@@ -45,7 +45,9 @@ if ($method === "PUT") {
 
     if ($id <= 0) send_json(["success" => false, "error" => "ID inválido"], 400);
 
-    $totalDeuda = isset($data['deuda']) && !is_array($data['deuda']) ? floatval($data['deuda']) : 0;
+    // Rounded to cents first: an amount like 0.004 would otherwise pass the check below
+    // and store a 0.00 payment
+    $totalDeuda = isset($data['deuda']) && !is_array($data['deuda']) ? round(floatval($data['deuda']), 2) : 0;
 
     if ($totalDeuda <= 0) {
         send_json(["success" => false, "error" => "La deuda debe ser mayor a 0"], 400);
@@ -78,10 +80,10 @@ if ($method === "PUT") {
 
     $queryUpdateDeuda = "
         UPDATE sap_cl00
-        SET cl_deb = cl_deb - ?
+        SET cl_deb = cl_deb - CAST(? AS DECIMAL(12,2))
         WHERE cl_ide = ?
           AND cl_emp = ?
-          AND cl_deb - ? >= 0
+          AND cl_deb - CAST(? AS DECIMAL(12,2)) >= 0
           AND cl_deb > 0
     ";
 

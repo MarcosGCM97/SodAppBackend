@@ -199,8 +199,9 @@ function registrar_venta_lineas($con, $companyId, $clienteId, $lineas, $fecha) {
 
     $stmtAddBalance = prepare_or_fail($con, 'INSERT INTO sap_ce00 (ce_cli, ce_pro, ce_can, ce_emp) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE ce_can = ce_can + VALUES(ce_can)');
 
-    // Atomic increment of the client debt; NULL counts as 0
-    $stmtAddDebt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_deb = COALESCE(cl_deb, 0) + ? WHERE cl_ide = ? AND cl_emp = ?');
+    // Atomic increment of the client debt; NULL counts as 0. The CAST keeps the math in
+    // DECIMAL so the cents are exact instead of going through a floating point value.
+    $stmtAddDebt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_deb = COALESCE(cl_deb, 0) + CAST(? AS DECIMAL(12,2)) WHERE cl_ide = ? AND cl_emp = ?');
 
     $ventaIds = [];
 
@@ -211,7 +212,8 @@ function registrar_venta_lineas($con, $companyId, $clienteId, $lineas, $fecha) {
 
         $precio = isset($p['precio']) ? floatval($p['precio']) : 0;
 
-        $monto = $precio * $cantidad;
+        // Rounded to cents once so the sale line and the debt get the same amount
+        $monto = round($precio * $cantidad, 2);
 
         if (!$nombre || $cantidad<=0 || $precio<=0) {
             mysqli_rollback($con);

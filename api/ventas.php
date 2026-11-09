@@ -233,7 +233,7 @@ if ($method==="DELETE") {
     // The sale amount leaves the debt even below zero: whatever the client already paid
     // for this sale stays as a credit balance that the next sale consumes
     if ($revertirDeuda) {
-        $stmtRevertDebt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_deb = COALESCE(cl_deb, 0) - ? WHERE cl_ide = ? AND cl_emp = ?');
+        $stmtRevertDebt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_deb = COALESCE(cl_deb, 0) - CAST(? AS DECIMAL(12,2)) WHERE cl_ide = ? AND cl_emp = ?');
 
         $monto = floatval($venta['vt_mon']);
 
