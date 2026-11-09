@@ -7,16 +7,16 @@ require_once __DIR__ . '/lib.php';
 require_once __DIR__ . '/auth.php';
 allow_cors();
 
-// Every method requires a valid token; the owner always comes from it
-$userId = current_user_id();
+// Every method requires a valid token; the company (owner id) always comes from it
+$companyId = current_company_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
 // Owned, non-deleted cliente or a 404
-function require_cliente($con, $clienteId, $userId) {
+function require_cliente($con, $clienteId, $companyId) {
     $stmt = prepare_or_fail($con, 'SELECT cl_ide FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ? AND is_deleted = 0');
 
-    mysqli_stmt_bind_param($stmt, 'ii', $clienteId, $userId);
+    mysqli_stmt_bind_param($stmt, 'ii', $clienteId, $companyId);
 
     mysqli_stmt_execute($stmt);
 
@@ -26,11 +26,12 @@ function require_cliente($con, $clienteId, $userId) {
 }
 
 if ($method === 'GET') {
+    require_permission('clientes.ver');
     $clienteId = isset($_GET['clienteId']) ? parse_non_negative_int($_GET['clienteId']) : null;
 
     if (!$clienteId) send_json(["success"=>false,"error"=>"clienteId requerido"],400);
 
-    require_cliente($con, $clienteId, $userId);
+    require_cliente($con, $clienteId, $companyId);
 
     // Every owned, non-deleted returnable product; 0 when the cliente has no balance row yet
     $stmt = prepare_or_fail($con, 'SELECT pr.pr_ide, pr.pr_nom, COALESCE(ce.ce_can, 0) AS ce_can
@@ -39,7 +40,7 @@ if ($method === 'GET') {
         WHERE pr.pr_emp = ? AND pr.deleted_at IS NULL AND pr.pr_ret = 1
         ORDER BY pr.pr_nom');
 
-    mysqli_stmt_bind_param($stmt, 'ii', $clienteId, $userId);
+    mysqli_stmt_bind_param($stmt, 'ii', $clienteId, $companyId);
 
     mysqli_stmt_execute($stmt);
 
@@ -57,6 +58,8 @@ if ($method === 'GET') {
 }
 
 if ($method === 'POST') {
+    // refilling empties moves stock
+    require_permission('stock.editar');
     $data = get_json_input();
 
     $accion = isset($data['accion']) ? $data['accion'] : null;
@@ -73,7 +76,7 @@ if ($method === 'POST') {
 
     $stmt = prepare_or_fail($con, 'SELECT pr_ide, pr_ret FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ? AND deleted_at IS NULL');
 
-    mysqli_stmt_bind_param($stmt, 'si', $nombre, $userId);
+    mysqli_stmt_bind_param($stmt, 'si', $nombre, $companyId);
 
     mysqli_stmt_execute($stmt);
 
@@ -91,7 +94,7 @@ if ($method === 'POST') {
     $stmt = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_vac = pr_vac - ?, pr_stk = COALESCE(pr_stk, 0) + ?
         WHERE pr_ide = ? AND pr_emp = ? AND deleted_at IS NULL AND pr_ret = 1 AND pr_vac >= ?');
 
-    mysqli_stmt_bind_param($stmt, 'iiiii', $cantidad, $cantidad, $productoId, $userId, $cantidad);
+    mysqli_stmt_bind_param($stmt, 'iiiii', $cantidad, $cantidad, $productoId, $companyId, $cantidad);
 
     // The refill and its "llenado" movement are saved together
     mysqli_autocommit($con, false);
@@ -108,7 +111,7 @@ if ($method === 'POST') {
         send_json(["success"=>false,"error"=>"No hay suficientes envases vacíos"],409);
     }
 
-    if (!record_stock_movement($con, $userId, $nombre, 'llenado', $cantidad) || !mysqli_commit($con)) {
+    if (!record_stock_movement($con, $companyId, $nombre, 'llenado', $cantidad) || !mysqli_commit($con)) {
         mysqli_rollback($con);
 
         send_json(["success"=>false,"error"=>mysqli_error($con)],500);
@@ -117,7 +120,7 @@ if ($method === 'POST') {
 
     $stmt = prepare_or_fail($con, 'SELECT * FROM sap_pr00 WHERE pr_ide = ? AND pr_emp = ?');
 
-    mysqli_stmt_bind_param($stmt, 'ii', $productoId, $userId);
+    mysqli_stmt_bind_param($stmt, 'ii', $productoId, $companyId);
 
     mysqli_stmt_execute($stmt);
 
@@ -127,6 +130,7 @@ if ($method === 'POST') {
 }
 
 if ($method === 'PUT') {
+    require_permission('clientes.editar');
     $data = get_json_input();
 
     $clienteId = isset($data['clienteId']) ? parse_non_negative_int($data['clienteId']) : null;
@@ -141,11 +145,11 @@ if ($method === 'PUT') {
 
     if ($cantidad === null) send_json(["success"=>false,"error"=>"Dato inválido: cantidad debe ser un número entero mayor o igual a 0"],400);
 
-    require_cliente($con, $clienteId, $userId);
+    require_cliente($con, $clienteId, $companyId);
 
     $stmt = prepare_or_fail($con, 'SELECT pr_nom, pr_ret FROM sap_pr00 WHERE pr_ide = ? AND pr_emp = ? AND deleted_at IS NULL');
 
-    mysqli_stmt_bind_param($stmt, 'ii', $productoId, $userId);
+    mysqli_stmt_bind_param($stmt, 'ii', $productoId, $companyId);
 
     mysqli_stmt_execute($stmt);
 
@@ -160,7 +164,7 @@ if ($method === 'PUT') {
     $stmt = prepare_or_fail($con, 'INSERT INTO sap_ce00 (ce_cli, ce_pro, ce_can, ce_emp) VALUES (?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE ce_can = VALUES(ce_can)');
 
-    mysqli_stmt_bind_param($stmt, 'iiii', $clienteId, $productoId, $cantidad, $userId);
+    mysqli_stmt_bind_param($stmt, 'iiii', $clienteId, $productoId, $cantidad, $companyId);
 
     if (!mysqli_stmt_execute($stmt)) send_json(["success"=>false,"error"=>mysqli_stmt_error($stmt)],500);
 

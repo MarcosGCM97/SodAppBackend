@@ -25,8 +25,8 @@ allow_cors();
 //                     delivered quantities as sales (registrar_venta_lineas) and marks it entregada.
 //   no_entregar       {"paradaId"}: pendiente -> no_entregada; reabrir: no_entregada -> pendiente.
 
-// Every method requires a valid token; the owner always comes from it
-$userId = current_user_id();
+// Every method requires a valid token; the company (owner id) always comes from it
+$companyId = current_company_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
@@ -53,19 +53,19 @@ function fetch_all_assoc($stmt) {
 }
 
 // Dated reparto of the owner (templates are not reachable by id), or null
-function reparto_del_usuario($con, $userId, $repartoId) {
+function reparto_del_usuario($con, $companyId, $repartoId) {
     $stmt = prepare_or_fail($con, 'SELECT rp_ide, rp_fec, rp_dia FROM sap_rp00 WHERE rp_ide = ? AND rp_emp = ? AND rp_fec IS NOT NULL');
-    mysqli_stmt_bind_param($stmt, 'ii', $repartoId, $userId);
+    mysqli_stmt_bind_param($stmt, 'ii', $repartoId, $companyId);
     $rows = fetch_all_assoc($stmt);
     return $rows ? $rows[0] : null;
 }
 
 // Stop of a dated reparto of the owner, locked for the rest of the transaction, or null
-function parada_del_usuario($con, $userId, $paradaId) {
+function parada_del_usuario($con, $companyId, $paradaId) {
     $stmt = prepare_or_fail($con, 'SELECT s.rs_ide, s.rs_rp, s.rs_cli, s.rs_est FROM sap_rs00 s
         JOIN sap_rp00 r ON r.rp_ide = s.rs_rp
         WHERE s.rs_ide = ? AND r.rp_emp = ? AND r.rp_fec IS NOT NULL FOR UPDATE');
-    mysqli_stmt_bind_param($stmt, 'ii', $paradaId, $userId);
+    mysqli_stmt_bind_param($stmt, 'ii', $paradaId, $companyId);
     $rows = fetch_all_assoc($stmt);
     return $rows ? $rows[0] : null;
 }
@@ -125,9 +125,9 @@ function copiar_paradas($con, $origenId, $destinoId) {
     }
 }
 
-function insertar_reparto($con, $userId, $fecha, $dia) {
+function insertar_reparto($con, $companyId, $fecha, $dia) {
     $stmt = prepare_or_fail($con, 'INSERT INTO sap_rp00 (rp_emp, rp_fec, rp_dia) VALUES (?, ?, ?)');
-    mysqli_stmt_bind_param($stmt, 'isi', $userId, $fecha, $dia);
+    mysqli_stmt_bind_param($stmt, 'isi', $companyId, $fecha, $dia);
     if (!mysqli_stmt_execute($stmt)) fallar($con, 500, mysqli_stmt_error($stmt));
     return mysqli_insert_id($con);
 }
@@ -138,14 +138,15 @@ function commit_or_fail($con) {
 }
 
 if ($method === 'GET') {
+    require_permission('repartos.ver');
     if (isset($_GET['id'])) {
         $repartoId = parse_non_negative_int($_GET['id']);
-        $reparto = $repartoId ? reparto_del_usuario($con, $userId, $repartoId) : null;
+        $reparto = $repartoId ? reparto_del_usuario($con, $companyId, $repartoId) : null;
     } else if (isset($_GET['fecha'])) {
         $fecha = parse_fecha($_GET['fecha']);
         if ($fecha === null) send_json(["success" => false, "error" => "Fecha inválida: debe ser AAAA-MM-DD"], 400);
         $stmt = prepare_or_fail($con, 'SELECT rp_ide FROM sap_rp00 WHERE rp_emp = ? AND rp_fec = ? ORDER BY rp_ide LIMIT 1');
-        mysqli_stmt_bind_param($stmt, 'is', $userId, $fecha);
+        mysqli_stmt_bind_param($stmt, 'is', $companyId, $fecha);
         $rows = fetch_all_assoc($stmt);
         $reparto = $rows ? ['rp_ide' => $rows[0]['rp_ide']] : null;
     } else {
@@ -158,6 +159,8 @@ if ($method === 'GET') {
 }
 
 if ($method === 'POST') {
+    // every action, entregar included (it registers the delivered sales)
+    require_permission('repartos.gestionar');
     $data = get_json_input();
 
     $accion = isset($data['accion']) ? $data['accion'] : null;
@@ -176,26 +179,26 @@ if ($method === 'POST') {
 
         // One reparto per date for now; rp_rep can widen this later (per repartidor)
         $stmt = prepare_or_fail($con, 'SELECT rp_ide FROM sap_rp00 WHERE rp_emp = ? AND rp_fec = ? FOR UPDATE');
-        mysqli_stmt_bind_param($stmt, 'is', $userId, $fecha);
+        mysqli_stmt_bind_param($stmt, 'is', $companyId, $fecha);
         if (fetch_all_assoc($stmt)) fallar($con, 409, "Ya existe un reparto para esa fecha");
 
         $origenId = null;
         if ($origen === 'plantilla') {
             $stmt = prepare_or_fail($con, 'SELECT rp_ide FROM sap_rp00 WHERE rp_emp = ? AND rp_fec IS NULL AND rp_dia = ?');
-            mysqli_stmt_bind_param($stmt, 'ii', $userId, $dia);
+            mysqli_stmt_bind_param($stmt, 'ii', $companyId, $dia);
             $rows = fetch_all_assoc($stmt);
             if (!$rows) fallar($con, 404, "No hay una plantilla guardada para ese día");
             $origenId = (int) $rows[0]['rp_ide'];
         } else if ($origen === 'anterior') {
             $stmt = prepare_or_fail($con, 'SELECT rp_ide FROM sap_rp00 WHERE rp_emp = ? AND rp_dia = ? AND rp_fec < ?
                 ORDER BY rp_fec DESC, rp_ide DESC LIMIT 1');
-            mysqli_stmt_bind_param($stmt, 'iis', $userId, $dia, $fecha);
+            mysqli_stmt_bind_param($stmt, 'iis', $companyId, $dia, $fecha);
             $rows = fetch_all_assoc($stmt);
             if (!$rows) fallar($con, 404, "No hay un reparto anterior de ese día");
             $origenId = (int) $rows[0]['rp_ide'];
         }
 
-        $repartoId = insertar_reparto($con, $userId, $fecha, $dia);
+        $repartoId = insertar_reparto($con, $companyId, $fecha, $dia);
 
         if ($origenId !== null) {
             copiar_paradas($con, $origenId, $repartoId);
@@ -203,7 +206,7 @@ if ($method === 'POST') {
             $stmt = prepare_or_fail($con, "INSERT INTO sap_rs00 (rs_rp, rs_cli, rs_ord, rs_est) VALUES (?, ?, ?, 'pendiente')");
             $stmtClientes = prepare_or_fail($con, 'SELECT c.cl_ide FROM sap_cl00 c JOIN sap_cd00 d ON d.cd_cli = c.cl_ide
                 WHERE c.cl_emp = ? AND c.is_deleted = 0 AND d.cd_dia = ? ORDER BY c.cl_nom, c.cl_ide');
-            mysqli_stmt_bind_param($stmtClientes, 'ii', $userId, $dia);
+            mysqli_stmt_bind_param($stmtClientes, 'ii', $companyId, $dia);
             foreach (fetch_all_assoc($stmtClientes) as $i => $c) {
                 $orden = $i + 1;
                 $clienteId = (int) $c['cl_ide'];
@@ -219,17 +222,17 @@ if ($method === 'POST') {
 
     if ($accion === 'guardar_plantilla') {
         $repartoId = isset($data['repartoId']) ? parse_non_negative_int($data['repartoId']) : null;
-        $reparto = $repartoId ? reparto_del_usuario($con, $userId, $repartoId) : null;
+        $reparto = $repartoId ? reparto_del_usuario($con, $companyId, $repartoId) : null;
         if (!$reparto) fallar($con, 404, "Reparto no encontrado");
 
         $dia = (int) $reparto['rp_dia'];
 
         // The previous template of that weekday goes away with its stops and lines (cascade)
         $stmt = prepare_or_fail($con, 'DELETE FROM sap_rp00 WHERE rp_emp = ? AND rp_fec IS NULL AND rp_dia = ?');
-        mysqli_stmt_bind_param($stmt, 'ii', $userId, $dia);
+        mysqli_stmt_bind_param($stmt, 'ii', $companyId, $dia);
         if (!mysqli_stmt_execute($stmt)) fallar($con, 500, mysqli_stmt_error($stmt));
 
-        $plantillaId = insertar_reparto($con, $userId, null, $dia);
+        $plantillaId = insertar_reparto($con, $companyId, null, $dia);
         copiar_paradas($con, $repartoId, $plantillaId);
 
         commit_or_fail($con);
@@ -239,11 +242,11 @@ if ($method === 'POST') {
 
     if ($accion === 'agregar_parada') {
         $repartoId = isset($data['repartoId']) ? parse_non_negative_int($data['repartoId']) : null;
-        if (!$repartoId || !reparto_del_usuario($con, $userId, $repartoId)) fallar($con, 404, "Reparto no encontrado");
+        if (!$repartoId || !reparto_del_usuario($con, $companyId, $repartoId)) fallar($con, 404, "Reparto no encontrado");
 
         $clienteId = isset($data['clienteId']) ? parse_non_negative_int($data['clienteId']) : null;
         $stmt = prepare_or_fail($con, 'SELECT cl_ide FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ? AND is_deleted = 0');
-        mysqli_stmt_bind_param($stmt, 'ii', $clienteId, $userId);
+        mysqli_stmt_bind_param($stmt, 'ii', $clienteId, $companyId);
         if (!$clienteId || !fetch_all_assoc($stmt)) fallar($con, 404, "Cliente no encontrado o eliminado");
 
         // Appended last; the unique (rs_rp, rs_cli) key rejects a cliente already in the reparto
@@ -264,7 +267,7 @@ if ($method === 'POST') {
     if (in_array($accion, ['quitar_parada', 'guardar_lineas', 'entregar', 'no_entregar', 'reabrir'], true)) {
         // The stop row stays locked until commit, so two deliveries of one stop run one after the other
         $paradaId = isset($data['paradaId']) ? parse_non_negative_int($data['paradaId']) : null;
-        $parada = $paradaId ? parada_del_usuario($con, $userId, $paradaId) : null;
+        $parada = $paradaId ? parada_del_usuario($con, $companyId, $paradaId) : null;
         if (!$parada) fallar($con, 404, "Parada no encontrada");
 
         // entregada is final; only no_entregada goes back to pendiente
@@ -296,9 +299,9 @@ if ($method === 'POST') {
 
         $stmtProducto = prepare_or_fail($con, 'SELECT pr_nom, pr_val, pr_ret FROM sap_pr00 WHERE pr_ide = ? AND pr_emp = ? AND deleted_at IS NULL');
         $productos = [];
-        $producto = function ($productoId) use ($con, $userId, $stmtProducto, &$productos) {
+        $producto = function ($productoId) use ($con, $companyId, $stmtProducto, &$productos) {
             if (!isset($productos[$productoId])) {
-                mysqli_stmt_bind_param($stmtProducto, 'ii', $productoId, $userId);
+                mysqli_stmt_bind_param($stmtProducto, 'ii', $productoId, $companyId);
                 $rows = fetch_all_assoc($stmtProducto);
                 if (!$rows) fallar($con, 404, "Producto no encontrado: $productoId");
                 $productos[$productoId] = $rows[0];
@@ -352,7 +355,7 @@ if ($method === 'POST') {
         if (!$lineasVenta) fallar($con, 400, "No hay productos entregados: para registrar que no se entregó use no_entregar");
 
         // Same sale registration as POST ventas (stock, movements, containers, debt), in this transaction
-        $ventaIds = registrar_venta_lineas($con, $userId, (int) $parada['rs_cli'], array_values($lineasVenta), date('Y-m-d H:i:s'));
+        $ventaIds = registrar_venta_lineas($con, $companyId, (int) $parada['rs_cli'], array_values($lineasVenta), date('Y-m-d H:i:s'));
         $ventaPorProducto = array_combine(array_keys($lineasVenta), $ventaIds);
 
         $stmtUpdate = prepare_or_fail($con, 'UPDATE sap_rl00 SET rl_cen = ?, rl_pre = ?, rl_dev = ?, rl_vt = ? WHERE rl_rs = ? AND rl_pro = ?');
@@ -400,7 +403,7 @@ if ($method === 'POST') {
         foreach ($lineas as $l) {
             $productoId = isset($l['productoId']) ? parse_non_negative_int($l['productoId']) : null;
             if (!$productoId) continue; // reported as an invalid line below
-            mysqli_stmt_bind_param($stmtProducto, 'ii', $productoId, $userId);
+            mysqli_stmt_bind_param($stmtProducto, 'ii', $productoId, $companyId);
             $rows = fetch_all_assoc($stmtProducto);
             if (!$rows) fallar($con, 404, "Producto no encontrado: $productoId");
             $precios[$productoId] = $rows[0]['pr_val'];
@@ -437,7 +440,7 @@ if ($method === 'POST') {
 
     if ($accion === 'ordenar') {
         $repartoId = isset($data['repartoId']) ? parse_non_negative_int($data['repartoId']) : null;
-        if (!$repartoId || !reparto_del_usuario($con, $userId, $repartoId)) fallar($con, 404, "Reparto no encontrado");
+        if (!$repartoId || !reparto_del_usuario($con, $companyId, $repartoId)) fallar($con, 404, "Reparto no encontrado");
 
         $orden = isset($data['paradas']) && is_array($data['paradas']) ? array_map('parse_non_negative_int', $data['paradas']) : [];
 

@@ -1117,8 +1117,9 @@ expect_status('GET movimientos of a soft-deleted producto -> 404', 404, http('GE
 db_exec('UPDATE sap_pr00 SET deleted_at = NULL WHERE pr_ide = ?', 'i', [$histId]);
 
 // Deleting a sale reverts its amount from the debt, even below zero (credit balance)
+// The raw DECIMAL(12,2) column as MySQL returns it ("300.00"), so cents are compared exactly
 function deuda_of($clienteId) {
-    return (int) db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$clienteId])['cl_deb'];
+    return db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$clienteId])['cl_deb'];
 }
 function last_venta_of($name, $userId) {
     return (int) db_row('SELECT MAX(vt_ide) AS id FROM sap_vt00 WHERE vt_pro = ? AND vt_emp = ?', 'si', [$name, $userId])['id'];
@@ -1130,25 +1131,51 @@ expect_status('Ariza POST venta of 1000 for debt revert', 201, http('POST', 'ven
 ]], $tokA));
 $debtVtId = last_venta_of($histName, $arizaId);
 expect_status('Ariza pays 700 of the 1000', 200, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 700], null, $tokA));
-check('Debt after paying 700 of 1000 is 300', deuda_of($envClId) === 300, (string) deuda_of($envClId));
+check('Debt after paying 700 of 1000 is 300', deuda_of($envClId) === '300.00', (string) deuda_of($envClId));
 
 expect_status('Congre DELETE Ariza venta with revertir_deuda -> 404', 404, http('DELETE', 'ventas.php', ['id' => $debtVtId, 'revertir_deuda' => 1], null, $tokC));
-check('Rejected DELETE left the debt unchanged', deuda_of($envClId) === 300, (string) deuda_of($envClId));
+check('Rejected DELETE left the debt unchanged', deuda_of($envClId) === '300.00', (string) deuda_of($envClId));
 
 expect_status('Ariza DELETE paid venta with revertir_deuda', 200, http('DELETE', 'ventas.php', ['id' => $debtVtId, 'revertir_deuda' => 1], null, $tokA));
-check('Deleting a partly paid venta leaves a credit balance of -700', deuda_of($envClId) === -700, (string) deuda_of($envClId));
+check('Deleting a partly paid venta leaves a credit balance of -700', deuda_of($envClId) === '-700.00', (string) deuda_of($envClId));
 list(, $j) = http('GET', 'deudaCliente.php', ['id' => $envClId], null, $tokA);
-check('GET deudaCliente returns the credit balance', isset($j['deudor']['cl_deb']) && (int) $j['deudor']['cl_deb'] === -700, json_encode($j));
+check('GET deudaCliente returns the credit balance', ($j['deudor']['cl_deb'] ?? null) === '-700.00', json_encode($j));
 
 expect_status('Ariza POST venta of 500 consumes the credit', 201, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
     ['nombre' => $histName, 'cantidad' => 1, 'precio' => 500],
 ]], $tokA));
-check('Next venta consumes the credit balance (-200)', deuda_of($envClId) === -200, (string) deuda_of($envClId));
+check('Next venta consumes the credit balance (-200)', deuda_of($envClId) === '-200.00', (string) deuda_of($envClId));
 
 // Older app versions revert the debt themselves after the DELETE
 expect_status('Ariza DELETE venta without revertir_deuda', 200, http('DELETE', 'ventas.php', ['id' => last_venta_of($histName, $arizaId)], null, $tokA));
-check('DELETE without revertir_deuda leaves the debt unchanged', deuda_of($envClId) === -200, (string) deuda_of($envClId));
-db_exec('UPDATE sap_cl00 SET cl_deb = ? WHERE cl_ide = ?', 'ii', [$debtBefore, $envClId]);
+check('DELETE without revertir_deuda leaves the debt unchanged', deuda_of($envClId) === '-200.00', (string) deuda_of($envClId));
+
+// Debts keep cents: sales, reverted sales and payments move the exact amount
+db_exec('UPDATE sap_cl00 SET cl_deb = 0 WHERE cl_ide = ?', 'i', [$envClId]);
+expect_status('Ariza POST venta of 1250.50', 201, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $histName, 'cantidad' => 1, 'precio' => 1250.5],
+]], $tokA));
+check('A venta of 1250.50 adds exactly 1250.50 to the debt', deuda_of($envClId) === '1250.50', (string) deuda_of($envClId));
+$centsVtId = last_venta_of($histName, $arizaId);
+// 3 * 0.1 is 0.30000000000000004 in floating point
+expect_status('Ariza POST venta of 3 x 0.10', 201, http('POST', 'ventas.php', [], ['clienteId' => $envClId, 'productos' => [
+    ['nombre' => $histName, 'cantidad' => 3, 'precio' => 0.1],
+]], $tokA));
+check('A venta of 3 x 0.10 adds exactly 0.30 to the debt', deuda_of($envClId) === '1250.80', (string) deuda_of($envClId));
+expect_status('Ariza DELETE the 1250.50 venta with revertir_deuda', 200, http('DELETE', 'ventas.php', ['id' => $centsVtId, 'revertir_deuda' => 1], null, $tokA));
+check('Deleting the 1250.50 venta subtracts exactly 1250.50', deuda_of($envClId) === '0.30', (string) deuda_of($envClId));
+
+$centsPg = (int) db_row('SELECT COALESCE(MAX(pg_ide), 0) AS id FROM sap_pg00')['id'];
+list($st, , $raw) = http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => '0.004'], null, $tokA);
+check('PUT deuda that rounds to 0.00 -> 400', $st === 400
+    && (json_decode($raw, true)['error'] ?? null) === 'La deuda debe ser mayor a 0', "$st $raw");
+check('PUT deuda that rounds to 0.00 left the debt unchanged', deuda_of($envClId) === '0.30', (string) deuda_of($envClId));
+expect_status('Ariza pays exactly the whole 0.30 debt', 200, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => '0.3'], null, $tokA));
+check('Paying exactly the whole debt with cents leaves 0.00', deuda_of($envClId) === '0.00', (string) deuda_of($envClId));
+check('Only the accepted cents payment was stored, with its exact amount',
+    array_column(db_rows('SELECT pg_mon FROM sap_pg00 WHERE pg_ide > ? ORDER BY pg_ide', 'i', [$centsPg]), 'pg_mon') === ['0.30'],
+    json_encode(db_rows('SELECT pg_mon FROM sap_pg00 WHERE pg_ide > ?', 'i', [$centsPg])));
+db_exec('UPDATE sap_cl00 SET cl_deb = ? WHERE cl_ide = ?', 'si', [$debtBefore, $envClId]);
 
 // ---------------------------------------------------------------- 8. payments (formas de pago)
 
@@ -1162,11 +1189,12 @@ function payments_of($clienteId) {
         return ['pg_cli' => (int) $p['pg_cli'], 'pg_mon' => $p['pg_mon'], 'pg_fp' => (int) $p['pg_fp'], 'pg_emp' => (int) $p['pg_emp']];
     }, $rows);
 }
+// Bound as a string so a decimal debt is restored exactly
 function set_debt($clienteId, $deuda) {
-    db_exec('UPDATE sap_cl00 SET cl_deb = ? WHERE cl_ide = ?', 'ii', [$deuda, $clienteId]);
+    db_exec('UPDATE sap_cl00 SET cl_deb = ? WHERE cl_ide = ?', 'si', [$deuda, $clienteId]);
 }
 function debt_of($clienteId) {
-    return (int) db_row('SELECT cl_deb FROM sap_cl00 WHERE cl_ide = ?', 'i', [$clienteId])['cl_deb'];
+    return deuda_of($clienteId);
 }
 // Congre's cliente of section 3 was deleted in section 5: create a fresh one
 $pagoClName = MARKER . 'pagocli_' . substr(md5(uniqid('', true)), 0, 6);
@@ -1193,7 +1221,7 @@ check('PUT deuda with formaPago keeps the same response body',
 check('PUT deuda with formaPago stored the payment',
     payments_of($envClId) === [['pg_cli' => $envClId, 'pg_mon' => '300.50', 'pg_fp' => $efectivo, 'pg_emp' => $arizaId]],
     json_encode(payments_of($envClId)));
-check('PUT deuda with formaPago lowered the balance', debt_of($envClId) === 700, (string) debt_of($envClId));
+check('PUT deuda with formaPago lowered the balance by 300.50', debt_of($envClId) === '699.50', (string) debt_of($envClId));
 
 // S4 old app versions send no method: stored as Sin especificar
 expect_status('PUT deuda without formaPago (old app)', 200, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 100], null, $tokA));
@@ -1207,7 +1235,7 @@ expect_status('PUT deuda with a non-numeric formaPago -> 400', 400, http('PUT', 
 expect_status('PUT deuda larger than the balance with formaPago -> 409', 409, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 5000, 'formaPago' => $efectivo], null, $tokA));
 expect_status('Congre PUT deuda of Ariza cliente with formaPago -> 404', 404, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 10, 'formaPago' => $efectivo], null, $tokC));
 check('Rejected payments stored nothing', count(payments_of($envClId)) === $before, json_encode(payments_of($envClId)));
-check('Rejected payments left the balance unchanged', debt_of($envClId) === 600, (string) debt_of($envClId));
+check('Rejected payments left the balance unchanged', debt_of($envClId) === '599.50', (string) debt_of($envClId));
 
 // S5 payment history per client, newest first
 expect_status('PUT deuda with Transferencia', 200, http('PUT', 'deudaCliente.php', ['id' => $envClId, 'deuda' => 50, 'formaPago' => $transferencia], null, $tokA));
@@ -1708,6 +1736,117 @@ $tplId = (int) (db_row('SELECT rp_ide FROM sap_rp00 WHERE rp_emp = ? AND rp_fec 
 expect_status('Route of a weekday template -> 404', 404, http('GET', 'ruta.php', ['repartoId' => $tplId], null, $tokC));
 $r = http('GET', 'repartos.php', ['id' => $rtId], null, $tokC);
 check('GET repartos returns the trip times', ($r[1]['reparto']['rp_ini'] ?? null) === '2099-05-04 08:00:00' && ($r[1]['reparto']['rp_fin'] ?? null) === $fin, short($r[2]));
+
+// ---------------------------------------------------------------- 10. sales/payments report (reporte-ventas-cobros)
+
+// Fixtures in 2098 so no other row of the run falls in the ranges
+$rcSuffix = substr(md5(uniqid('', true)), 0, 6);
+foreach (['x', 'y'] as $k) {
+    db_exec('INSERT INTO sap_cl00 (cl_nom, cl_dir, cl_tel, cl_deb, cl_emp) VALUES (?, ?, ?, 0, ?)', 'sssi',
+        [MARKER . "rep{$k}_$rcSuffix", 'Calle 1', '351', $congreId]);
+}
+$repX = (int) db_row('SELECT cl_ide FROM sap_cl00 WHERE cl_nom = ?', 's', [MARKER . "repx_$rcSuffix"])['cl_ide'];
+$repY = (int) db_row('SELECT cl_ide FROM sap_cl00 WHERE cl_nom = ?', 's', [MARKER . "repy_$rcSuffix"])['cl_ide'];
+$repPr = MARKER . "repprod_$rcSuffix";
+$repOtro = MARKER . "repotro_$rcSuffix";
+db_exec('INSERT INTO sap_pr00 (pr_nom, pr_val, pr_stk, pr_emp) VALUES (?, 300, 0, ?)', 'si', [$repPr, $congreId]);
+$repVenta = function ($cli, $pro, $can, $mon, $fec, $emp) {
+    db_exec('INSERT INTO sap_vt00 (vt_cli, vt_pro, vt_can, vt_fec, vt_emp, vt_mon) VALUES (?, ?, ?, ?, ?, ?)', 'isisid',
+        [$cli, $pro, $can, $fec, $emp, $mon]);
+};
+// one sale of two lines; the stored amount wins over the current price (2 x 300 != 500)
+$repVenta($repX, $repPr, 2, 500, '2098-03-02 10:00:00', $congreId);
+$repVenta($repX, $repOtro, 1, 100.25, '2098-03-02 10:00:00', $congreId);
+// legacy line without stored amount: estimated with the current price
+$repVenta($repY, $repPr, 1, 0, '2098-03-04 23:30:00', $congreId);
+// outside the week, inside the month
+$repVenta($repY, $repPr, 1, 300, '2098-03-09 09:00:00', $congreId);
+// previous week
+$repVenta($repY, $repPr, 1, 200, '2098-02-25 11:00:00', $congreId);
+// Ariza's sale in the same week never shows for Congre
+$repVenta((int) $targetCl['cl_ide'], $targetPrName, 1, 999, '2098-03-05 10:00:00', $arizaId);
+$repPago = function ($cli, $mon, $fp, $fec) use ($congreId) {
+    db_exec('INSERT INTO sap_pg00 (pg_cli, pg_mon, pg_fp, pg_fec, pg_emp) VALUES (?, ?, ?, ?, ?)', 'idisi',
+        [$cli, $mon, $fp, $fec, $congreId]);
+};
+$fpEfectivo = (int) db_row("SELECT fp_ide FROM sap_fp00 WHERE fp_nom = 'Efectivo'")['fp_ide'];
+$fpTransf = (int) db_row("SELECT fp_ide FROM sap_fp00 WHERE fp_nom = 'Transferencia'")['fp_ide'];
+$repPago($repX, 400, $fpEfectivo, '2098-03-03 12:00:00');
+$repPago($repY, 50, $fpTransf, '2098-03-08 23:59:59');
+$repPago($repY, 10, $fpEfectivo, '2098-03-09 00:00:00');
+$repPago($repX, 70, $fpEfectivo, '2098-02-26 08:00:00');
+
+$r = http('GET', 'reporte.php', ['desde' => '2098-03-02', 'hasta' => '2098-03-08'], null, $tokC);
+expect_status('GET reporte of a week', 200, $r);
+$rep = $r[1] ?? [];
+check('Reporte echoes the inclusive range', ($rep['desde'] ?? null) === '2098-03-02' && ($rep['hasta'] ?? null) === '2098-03-08', short($r[2]));
+check('Reporte resumen uses stored amounts and only the range', ($rep['resumen'] ?? null) == [
+    'vendido' => 900.25, 'cobrado' => 450.0, 'diferencia' => 450.25, 'ventas' => 2, 'clientes' => 2, 'lineasEstimadas' => 1,
+], json_encode($rep['resumen'] ?? null));
+check('Reporte cobros per method in method order', ($rep['cobros'] ?? null) == [
+    ['forma' => 'Efectivo', 'total' => 400.0], ['forma' => 'Transferencia', 'total' => 50.0],
+], json_encode($rep['cobros'] ?? null));
+check('Reporte productos sorted by amount', ($rep['productos'] ?? null) == [
+    ['producto' => $repPr, 'cantidad' => 3, 'monto' => 800.0], ['producto' => $repOtro, 'cantidad' => 1, 'monto' => 100.25],
+], json_encode($rep['productos'] ?? null));
+check('Reporte clientes sorted by amount', ($rep['clientes'] ?? null) == [
+    ['clienteId' => $repX, 'cliente' => MARKER . "repx_$rcSuffix", 'ventas' => 1, 'monto' => 600.25],
+    ['clienteId' => $repY, 'cliente' => MARKER . "repy_$rcSuffix", 'ventas' => 1, 'monto' => 300.0],
+], json_encode($rep['clientes'] ?? null));
+check('Reporte dias only lists days with sales', ($rep['dias'] ?? null) == [
+    ['fecha' => '2098-03-02', 'monto' => 600.25], ['fecha' => '2098-03-04', 'monto' => 300.0],
+], json_encode($rep['dias'] ?? null));
+$det = $rep['detalle'] ?? [];
+check('Reporte detalle lists every line in date order with the estimated flag', array_map(function ($d) {
+    return [$d['fecha'], $d['clienteId'], $d['producto'], $d['cantidad'], $d['monto'], $d['estimado']];
+}, $det) == [
+    ['2098-03-02 10:00:00', $repX, $repPr, 2, 500.0, false],
+    ['2098-03-02 10:00:00', $repX, $repOtro, 1, 100.25, false],
+    ['2098-03-04 23:30:00', $repY, $repPr, 1, 300.0, true],
+], json_encode($det));
+check('Reporte detalle carries the cliente name', ($det[0]['cliente'] ?? null) === MARKER . "repx_$rcSuffix");
+check('Reporte previous period defaults to the same length right before', ($rep['anterior'] ?? null) == [
+    'desde' => '2098-02-23', 'hasta' => '2098-03-01', 'vendido' => 200.0, 'cobrado' => 70.0, 'ventas' => 1,
+], json_encode($rep['anterior'] ?? null));
+$firstPg = db_row('SELECT MIN(pg_fec) AS f FROM sap_pg00 WHERE pg_emp = ?', 'i', [$congreId])['f'];
+check('Reporte returns the first recorded payment of the user', array_key_exists('primerCobro', $rep) && $rep['primerCobro'] === $firstPg, json_encode($rep['primerCobro'] ?? null));
+
+$r = http('GET', 'reporte.php', ['desde' => '2098-03-01', 'hasta' => '2098-03-31', 'compDesde' => '2098-02-01', 'compHasta' => '2098-02-28'], null, $tokC);
+$rep = $r[1] ?? [];
+check('Reporte of a month includes the whole month', ($rep['resumen']['vendido'] ?? null) == 1200.25 && ($rep['resumen']['cobrado'] ?? null) == 460.0
+    && ($rep['resumen']['ventas'] ?? null) === 3, json_encode($rep['resumen'] ?? null));
+check('Reporte uses the explicit comparison period', ($rep['anterior'] ?? null) == [
+    'desde' => '2098-02-01', 'hasta' => '2098-02-28', 'vendido' => 200.0, 'cobrado' => 70.0, 'ventas' => 1,
+], json_encode($rep['anterior'] ?? null));
+$r = http('GET', 'reporte.php', ['desde' => '2098-03-09', 'hasta' => '2098-03-09'], null, $tokC);
+check('Reporte of a single day starts at midnight', ($r[1]['resumen']['vendido'] ?? null) == 300.0 && ($r[1]['resumen']['cobrado'] ?? null) == 10.0, short($r[2]));
+$r = http('GET', 'reporte.php', ['desde' => '2097-01-01', 'hasta' => '2097-01-01'], null, $tokC);
+check('Reporte of an empty range is all zero, not an error', ($r[0] ?? 0) === 200 && ($r[1]['resumen'] ?? null) == [
+    'vendido' => 0.0, 'cobrado' => 0.0, 'diferencia' => 0.0, 'ventas' => 0, 'clientes' => 0, 'lineasEstimadas' => 0,
+] && ($r[1]['productos'] ?? null) === [] && ($r[1]['detalle'] ?? null) === [], short($r[2]));
+$r = http('GET', 'reporte.php', ['desde' => '2098-03-02', 'hasta' => '2098-03-08'], null, $tokA);
+check('Ariza reporte has only her sale of the week', ($r[1]['resumen']['vendido'] ?? null) == 999.0 && ($r[1]['resumen']['cobrado'] ?? null) == 0.0, short($r[2]));
+expect_status('Reporte without desde -> 400', 400, http('GET', 'reporte.php', ['hasta' => '2098-03-08'], null, $tokC));
+expect_status('Reporte with an invalid date -> 400', 400, http('GET', 'reporte.php', ['desde' => '2098-02-30', 'hasta' => '2098-03-08'], null, $tokC));
+expect_status('Reporte with desde after hasta -> 400', 400, http('GET', 'reporte.php', ['desde' => '2098-03-09', 'hasta' => '2098-03-08'], null, $tokC));
+expect_status('Reporte longer than 366 days -> 400', 400, http('GET', 'reporte.php', ['desde' => '2096-01-01', 'hasta' => '2098-03-08'], null, $tokC));
+expect_status('Reporte with only compDesde -> 400', 400, http('GET', 'reporte.php', ['desde' => '2098-03-02', 'hasta' => '2098-03-08', 'compDesde' => '2098-02-01'], null, $tokC));
+expect_status('Reporte without token -> 401', 401, http('GET', 'reporte.php', ['desde' => '2098-03-02', 'hasta' => '2098-03-08']));
+expect_status('POST reporte -> 405', 405, http('POST', 'reporte.php', [], ['x' => 1], $tokC));
+
+// B2 payment dates follow Argentina time even when the MySQL server runs on UTC
+$tzBefore = db_row('SELECT @@global.time_zone AS tz')['tz'];
+// restored even when the script aborts before the next statement
+register_shutdown_function(function () use ($tzBefore) { db_exec('SET GLOBAL time_zone = ?', 's', [$tzBefore]); });
+db_exec("SET GLOBAL time_zone = '+00:00'");
+check('Test server runs on UTC for the timezone check', db_row('SELECT @@global.time_zone AS tz')['tz'] === '+00:00');
+set_debt($repX, 100);
+expect_status('PUT deuda on a UTC server', 200, http('PUT', 'deudaCliente.php', ['id' => $repX, 'deuda' => 5, 'formaPago' => $fpEfectivo], null, $tokC));
+db_exec('SET GLOBAL time_zone = ?', 's', [$tzBefore]);
+$pgFec = db_row('SELECT pg_fec FROM sap_pg00 WHERE pg_cli = ? ORDER BY pg_ide DESC LIMIT 1', 'i', [$repX])['pg_fec'] ?? null;
+$ahoraAr = new DateTime('now', new DateTimeZone('America/Argentina/Buenos_Aires'));
+check('Payment date is stored in Argentina time on a UTC server', $pgFec !== null
+    && abs(strtotime($pgFec) - strtotime($ahoraAr->format('Y-m-d H:i:s'))) < 120, "$pgFec vs " . $ahoraAr->format('Y-m-d H:i:s'));
 
 // ---------------------------------------------------------------- summary
 

@@ -48,7 +48,7 @@ curl -X POST "http://<host>/api/clientes.php" \
 ```
 
 Notas:
-- El token incluye un campo `role` (si existe en la tabla de usuarios); los endpoints que requieren permisos pueden usar ese valor. Si no hay columna de rol, por defecto se asigna `user`.
+- El token solo lleva `us_ide` y `us_nom`; la empresa, el rol y los permisos se leen de la base en cada request (ver "Roles and permissions" abajo).
 - Recomendado: configurar la variable de entorno `JWT_SECRET` en el servidor para asegurar los tokens.
 
 Notas:
@@ -76,6 +76,11 @@ Clientes: localidad y coordenadas (migración 009)
 - `POST` acepta opcionales `localidadCl`, `latitudCl`, `longitudCl`. `PUT` acepta opcionales `cl_loc`, `cl_lat`, `cl_lng`: una clave que no se envía deja el valor como está (versiones viejas de la app); `null` lo borra.
 - Latitud y longitud van siempre juntas, en grados (-90..90, -180..180); si no, 400. Localidad: hasta 100 caracteres.
 
+Deuda con centavos (migración 010)
+----------------------------------
+- `cl_deb` es `DECIMAL(12,2)`: las ventas, los pagos y las ventas borradas con `revertir_deuda` mueven el monto exacto, sin redondear a enteros. Las lecturas devuelven `cl_deb` con dos decimales (`"4500.00"`).
+- `PUT deudaCliente.php` redondea `deuda` a centavos; un monto que queda en 0.00 responde 400 "La deuda debe ser mayor a 0".
+
 Ruta (api/ruta.php)
 -------------------
 Requiere token. Módulo aislado: solo lee repartos, paradas y clientes; es dueño de la planta (`sap_pl00`) y de los horarios del recorrido (`rp_ini`, `rp_fin`).
@@ -86,3 +91,67 @@ Requiere token. Módulo aislado: solo lee repartos, paradas y clientes; es dueñ
   - `guardar_planta` `{"direccion","localidad","lat"?,"lng"?}`: crea o reemplaza la planta. 400 si falta dirección o localidad, o las coordenadas son inválidas.
   - `iniciar` `{"repartoId":N}`: guarda la hora de inicio solo la primera vez; responde `{"inicio"}`.
   - `finalizar` `{"repartoId":N}`: guarda la hora de llegada a planta; responde `{"inicio","fin"}`. 409 si no se inició, si queda alguna parada `pendiente` o si ya se finalizó.
+
+Roles and permissions (migration 011)
+-------------------------------------
+Every user belongs to a company: `sap_us00.us_emp` is the owner's `us_ide` (the owner points to itself). All data rows keep the company in their owner column (`cl_emp`, `pr_emp`, `vt_emp`, `rp_emp`, ...) and every endpoint filters by the company of the token user (`current_company_id()` in `auth.php`), so every user of a company sees the same clientes, ventas and repartos and the rows a vendedor creates belong to the company.
+
+- Owner (`us_emp = us_ide`): every permission plus user and role administration (not grantable). Its own row cannot be changed through the admin API.
+- Other users: the permissions of their role (`us_rol` -> `sap_ro00`, `sap_rm00`, catalog `sap_pm00`).
+- Every request re-reads the user from the database: old tokens keep working, a role change applies at once, and a deactivated (`us_act = 0`) or deleted user gets 401 `Invalid or expired token`.
+- Missing permission: 403 `{"success":false,"error":"Forbidden: missing permission","permiso":"<code>"}` (`"permiso":"admin"` for the admin API). With "any of", the first code is reported.
+
+Permission catalog: `ventas.ver`, `ventas.cargar`, `ventas.eliminar`, `repartos.ver`, `repartos.gestionar`, `clientes.ver`, `clientes.editar`, `cobros.ver`, `cobros.cargar`, `stock.ver`, `stock.editar`, `caja.ver`. Migration 011 seeds one `Vendedor` role per owner with `ventas.ver`, `ventas.cargar`, `repartos.ver`, `repartos.gestionar`, `clientes.ver`, `clientes.editar`.
+
+Endpoint -> permission ("any of" for reference reads that several screens need):
+
+| Endpoint | Method / case | Permission |
+|----------|---------------|------------|
+| `clientes.php` | GET (list, `?id=`) | any of `clientes.ver`, `ventas.ver`, `ventas.cargar`, `repartos.ver`, `repartos.gestionar`, `cobros.ver` |
+| `clientes.php` | POST, PUT, DELETE | `clientes.editar` |
+| `dias.php` | GET (all, `?id=`) | any of `clientes.ver`, `ventas.ver`, `ventas.cargar`, `repartos.ver`, `repartos.gestionar` |
+| `dias.php` | PUT | `clientes.editar` |
+| `envases.php` | GET `?clienteId=` (client balance) | `clientes.ver` |
+| `envases.php` | PUT (set a client balance) | `clientes.editar` |
+| `envases.php` | POST `llenar` (refill empties, moves stock) | `stock.editar` |
+| `productos.php` | GET (list, `?nombre=`) | any of `stock.ver`, `ventas.ver`, `ventas.cargar`, `repartos.ver`, `repartos.gestionar`, `cobros.ver` |
+| `productos.php` | POST, PUT, DELETE | `stock.editar` |
+| `movimientos.php` | GET | `stock.ver` |
+| `ventas.php` | GET `?id=` (sales of a cliente) | any of `ventas.ver`, `cobros.ver` |
+| `ventas.php` | GET (recent sales) | `ventas.ver` |
+| `ventas.php` | POST | `ventas.cargar` |
+| `ventas.php` | DELETE | `ventas.eliminar` |
+| `repartos.php` | GET | `repartos.ver` |
+| `repartos.php` | POST (every `accion`, `entregar` included: it registers the delivered sales) | `repartos.gestionar` |
+| `ruta.php` | GET | `repartos.ver` |
+| `ruta.php` | POST (`guardar_planta`, `iniciar`, `finalizar`) | `repartos.gestionar` |
+| `deudaCliente.php` | GET | `cobros.ver` |
+| `deudaCliente.php` | PUT (register a payment) | `cobros.cargar` |
+| `pagos.php` | GET `?formas=1` | any of `cobros.ver`, `cobros.cargar` |
+| `pagos.php` | GET `?clienteId=` | `cobros.ver` |
+| `pagos.php` | GET `?mes=` (caja) | `caja.ver` |
+| `cajaMes.php` | GET | `caja.ver` |
+| `reporte.php` | GET (sales and payments report) | `caja.ver` |
+| `sesion.php` | GET | any valid token of an active user |
+| `usuarios.php`, `roles.php` | every method | owner only (`admin`) |
+
+Login and session:
+- `POST login.php` (and the legacy `GET login.php?nombre=&contraseña=`) answers `{"success":true,"message","usuario":{"us_ide","us_nom","us_emp","us_rol","us_act"},"token","es_dueno":bool,"permisos":[codes]}`; the owner gets the whole catalog. Never returns `us_pas`. Unknown name 404, wrong password 401, inactive user 401 `Usuario inactivo.`.
+- `GET sesion.php` -> `{"success":true,"us_ide":N,"us_nom":"..","es_dueno":bool,"permisos":[..]}`: the current permissions, for an app that starts with a saved session.
+
+Admin API (owner only):
+- `GET usuarios.php` -> `{"success":true,"usuarios":[{"us_ide","us_nom","us_rol","ro_nom","us_act","es_dueno"}]}` (company users, owner first).
+- `POST usuarios.php` `{"nombre","contrasena","rol"}` -> 201 `{"success":true,"us_ide":N}`: active user of the company, password stored with `password_hash`. 400 name not 3-100 characters (trimmed), password under 6 characters or missing role; 404 role not in the company; 409 name taken (names are global: login is by name).
+- `PUT usuarios.php` `{"id","rol"?,"contrasena"?,"activo"?}` -> `{"success":true}`. 404 user not in the company; 400 when the target is the owner, nothing to change or invalid data.
+- `GET roles.php` -> `{"success":true,"roles":[{"ro_ide","ro_nom","permisos":[codes],"usuarios":N}],"permisos_disponibles":[{"pm_cod","pm_des"}]}`.
+- `POST roles.php` `{"nombre","permisos":[codes]}` -> 201 `{"success":true,"ro_ide":N}`; `PUT roles.php` `{"id","nombre","permisos"}` replaces name and permissions; `DELETE roles.php?id=N`. 400 name not 1-50 characters or unknown code; 404 role not in the company; 409 duplicate name in the company, or (DELETE) users still have the role. Writes run in one transaction.
+
+Reporte de ventas y cobros (api/reporte.php)
+--------------------------------------------
+Requiere token y el permiso `caja.ver` (reemplaza a la pantalla de caja). Datos de la empresa del usuario (`current_company_id()`). Solo lectura. Reemplaza en la app a `cajaMes.php` y `pagos.php?mes=`, que siguen iguales para versiones viejas de la app.
+
+- `GET ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD`: rango inclusivo de hasta 366 días. Opcionales `compDesde` y `compHasta` (van juntos) para el período de comparación; si faltan, se usa la misma cantidad de días inmediatamente anterior. 400 ante fechas inválidas, `desde` > `hasta` o un rango más largo.
+- Responde `{"desde","hasta","resumen":{"vendido","cobrado","diferencia","ventas","clientes","lineasEstimadas"},"anterior":{"desde","hasta","vendido","cobrado","ventas"},"cobros":[{"forma","total"}],"productos":[{"producto","cantidad","monto"}],"clientes":[{"clienteId","cliente","ventas","monto"}],"dias":[{"fecha","monto"}],"detalle":[{"fecha","clienteId","cliente","producto","cantidad","monto","estimado"}],"primerCobro"}`.
+- Montos: el guardado en la venta (`vt_mon`). Las líneas viejas sin monto guardado se valoran al precio actual del producto y se marcan `estimado` (contadas en `lineasEstimadas`).
+- Una venta es un registro: las líneas con el mismo cliente y fecha/hora. `cobrado` suma los pagos (`sap_pg00`) del rango; `primerCobro` es el primer pago registrado del usuario (antes de la migración 007 los pagos no se guardaban).
+- Fechas: la conexión fija la zona horaria de MySQL igual a la de PHP (Argentina), así `pg_fec` y `vt_fec` usan el mismo reloj.

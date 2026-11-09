@@ -4,8 +4,8 @@ require_once __DIR__ . '/auth.php';
 
 allow_cors();
 
-// Every method requires a valid token; the owner always comes from it
-$userId = current_user_id();
+// Every method requires a valid token; the company (owner id) always comes from it
+$companyId = current_company_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
@@ -15,6 +15,7 @@ if ($method !== 'GET') {
 
 // GET /pagos.php?formas=1 -> payment methods the app can choose from
 if (isset($_GET['formas'])) {
+    require_permission(['cobros.ver', 'cobros.cargar']);
     $res = mysqli_query($con, 'SELECT fp_ide, fp_nom FROM sap_fp00 WHERE fp_sel = 1 ORDER BY fp_ide');
     if (!$res) send_json(["success" => false, "error" => mysqli_error($con)], 500);
 
@@ -27,11 +28,12 @@ if (isset($_GET['formas'])) {
 
 // GET /pagos.php?clienteId=1 -> payment history of one cliente, newest first
 if (isset($_GET['clienteId'])) {
+    require_permission('cobros.ver');
     $clienteId = is_array($_GET['clienteId']) ? 0 : intval($_GET['clienteId']);
 
     // The cliente must belong to the token user
     $check = prepare_or_fail($con, 'SELECT 1 FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ? AND is_deleted = 0');
-    mysqli_stmt_bind_param($check, 'ii', $clienteId, $userId);
+    mysqli_stmt_bind_param($check, 'ii', $clienteId, $companyId);
     mysqli_stmt_execute($check);
     $resCheck = mysqli_stmt_get_result($check);
     if (!$resCheck || mysqli_num_rows($resCheck) === 0) {
@@ -43,7 +45,7 @@ if (isset($_GET['clienteId'])) {
         JOIN sap_fp00 AS fp ON fp.fp_ide = pg.pg_fp
         WHERE pg.pg_cli = ? AND pg.pg_emp = ?
         ORDER BY pg.pg_fec DESC, pg.pg_ide DESC');
-    mysqli_stmt_bind_param($stmt, 'ii', $clienteId, $userId);
+    mysqli_stmt_bind_param($stmt, 'ii', $clienteId, $companyId);
     if (!mysqli_stmt_execute($stmt)) {
         send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
     }
@@ -57,6 +59,8 @@ if (isset($_GET['clienteId'])) {
 
 // GET /pagos.php?mes=1&ano=2026 -> amount collected in the month per payment method
 if (isset($_GET['mes'])) {
+    // monthly payments are part of the caja screen
+    require_permission('caja.ver');
     $mesRaw = is_string($_GET['mes']) ? trim($_GET['mes']) : '';
     if (!ctype_digit($mesRaw) || intval($mesRaw) < 1 || intval($mesRaw) > 12) {
         send_json(["success" => false, "error" => 'Mes incorrecto'], 400);
@@ -85,7 +89,7 @@ if (isset($_GET['mes'])) {
         WHERE pg.pg_emp = ? AND pg.pg_fec >= ? AND pg.pg_fec < ?
         GROUP BY fp.fp_ide, fp.fp_nom
         ORDER BY fp.fp_ide');
-    mysqli_stmt_bind_param($stmt, 'iss', $userId, $desde, $hasta);
+    mysqli_stmt_bind_param($stmt, 'iss', $companyId, $desde, $hasta);
     if (!mysqli_stmt_execute($stmt)) {
         send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
     }

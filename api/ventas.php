@@ -7,8 +7,8 @@ require_once __DIR__ . '/lib.php';
 require_once __DIR__ . '/auth.php';
 allow_cors();
 
-// Every method requires a valid token; the owner always comes from it
-$userId = current_user_id();
+// Every method requires a valid token; the company (owner id) always comes from it
+$companyId = current_company_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
@@ -17,6 +17,9 @@ $method = $_SERVER['REQUEST_METHOD'];
 if ($method === 'GET') {
     $usuarioId = isset($_GET['usuarioId']) ? $_GET['usuarioId'] : null;
     $clienteId = isset($_GET['id']) && intval($_GET['id'])>0 ? intval($_GET['id']) : null;
+    // The sales of one cliente are also shown in its cobros (debt) screen. The permission
+    // follows the parsed id: an invalid id (0, text) lists the company sales, so it needs ventas.ver.
+    require_permission($clienteId !== null ? ['ventas.ver', 'cobros.ver'] : 'ventas.ver');
 
     // Case 1: Filter by cliente AND usuarioId
     if ($clienteId && $usuarioId) {
@@ -27,7 +30,7 @@ if ($method === 'GET') {
         WHERE vt.vt_cli = ? AND vt.vt_emp = ? ORDER BY vt.vt_fec DESC
         LIMIT 15');
 
-        mysqli_stmt_bind_param($stmt, 'ii', $clienteId, $userId);
+        mysqli_stmt_bind_param($stmt, 'ii', $clienteId, $companyId);
 
         mysqli_stmt_execute($stmt);
 
@@ -50,7 +53,7 @@ if ($method === 'GET') {
             ORDER BY vt_fec DESC";
 
         $stmt = prepare_or_fail($con, $query);
-        mysqli_stmt_bind_param($stmt, 'i', $userId);
+        mysqli_stmt_bind_param($stmt, 'i', $companyId);
         mysqli_stmt_execute($stmt);
         $res = mysqli_stmt_get_result($stmt);
 
@@ -85,7 +88,7 @@ if ($method === 'GET') {
             FROM sap_vt00 vt 
             JOIN sap_cl00 cl ON vt.vt_cli = cl.cl_ide
             JOIN sap_pr00 pr ON vt.vt_pro = pr.pr_nom AND pr.pr_emp = vt.vt_emp
-            WHERE vt.vt_emp = " . intval($userId) . "
+            WHERE vt.vt_emp = " . intval($companyId) . "
             AND vt_fec >= NOW() - INTERVAL 5 DAY ORDER BY vt_fec DESC";
 
         $res = mysqli_query($con, $query);
@@ -119,6 +122,7 @@ if ($method === 'GET') {
 
 // POST: crear ventas. JSON: {"clienteId":1,"productos":[{"nombre":"X","cantidad":2}, ...]}
 if ($method === 'POST') {
+    require_permission('ventas.cargar');
     $data = get_json_input();
 
     if (!isset($data['clienteId']) || !isset($data['productos']) || !is_array($data['productos']) || count($data['productos'])===0) {
@@ -133,7 +137,7 @@ if ($method === 'POST') {
     // begin transaction (best effort)
     mysqli_autocommit($con, false);
 
-    registrar_venta_lineas($con, $userId, $clienteId, $data['productos'], $fecha);
+    registrar_venta_lineas($con, $companyId, $clienteId, $data['productos'], $fecha);
 
     // commit
     if (!mysqli_commit($con)) {
@@ -146,6 +150,7 @@ if ($method === 'POST') {
     send_json(["success"=>true,"message"=>"Ventas registradas correctamente"],201);
 }
 if ($method==="DELETE") {
+    require_permission('ventas.eliminar');
     $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
 
     // Newer app versions ask for the debt to be reverted here; older ones revert it
@@ -161,7 +166,7 @@ if ($method==="DELETE") {
     // Lock the line so two concurrent deletes cannot revert its containers twice
     $stmtFind = prepare_or_fail($con, 'SELECT vt_cli, vt_pro, vt_can, vt_dev, vt_mon FROM sap_vt00 WHERE vt_ide = ? AND vt_emp = ? FOR UPDATE');
 
-    mysqli_stmt_bind_param($stmtFind, 'ii', $id, $userId);
+    mysqli_stmt_bind_param($stmtFind, 'ii', $id, $companyId);
 
     mysqli_stmt_execute($stmtFind);
 
@@ -180,7 +185,7 @@ if ($method==="DELETE") {
 
     $cantidad = intval($venta['vt_can']);
 
-    mysqli_stmt_bind_param($stmtRestoreStock, 'isi', $cantidad, $venta['vt_pro'], $userId);
+    mysqli_stmt_bind_param($stmtRestoreStock, 'isi', $cantidad, $venta['vt_pro'], $companyId);
 
     if (!mysqli_stmt_execute($stmtRestoreStock)) {
         mysqli_rollback($con);
@@ -188,7 +193,7 @@ if ($method==="DELETE") {
         send_json(["success"=>false,"error"=>mysqli_stmt_error($stmtRestoreStock)],500);
     }
 
-    if (!record_stock_movement($con, $userId, $venta['vt_pro'], 'venta_eliminada', $cantidad, $id)) {
+    if (!record_stock_movement($con, $companyId, $venta['vt_pro'], 'venta_eliminada', $cantidad, $id)) {
         mysqli_rollback($con);
 
         send_json(["success"=>false,"error"=>mysqli_error($con)],500);
@@ -204,7 +209,7 @@ if ($method==="DELETE") {
 
         $stmtEmpties = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_vac = pr_vac - ? WHERE pr_nom = ? AND pr_emp = ?');
 
-        mysqli_stmt_bind_param($stmtEmpties, 'isi', $devueltos, $venta['vt_pro'], $userId);
+        mysqli_stmt_bind_param($stmtEmpties, 'isi', $devueltos, $venta['vt_pro'], $companyId);
 
         if (!mysqli_stmt_execute($stmtEmpties)) {
             mysqli_rollback($con);
@@ -216,7 +221,7 @@ if ($method==="DELETE") {
             SELECT ?, pr_ide, ?, pr_emp FROM sap_pr00 WHERE pr_nom = ? AND pr_emp = ?
             ON DUPLICATE KEY UPDATE ce_can = ce_can + VALUES(ce_can)');
 
-        mysqli_stmt_bind_param($stmtBalance, 'iisi', $clienteId, $saldo, $venta['vt_pro'], $userId);
+        mysqli_stmt_bind_param($stmtBalance, 'iisi', $clienteId, $saldo, $venta['vt_pro'], $companyId);
 
         if (!mysqli_stmt_execute($stmtBalance)) {
             mysqli_rollback($con);
@@ -228,13 +233,13 @@ if ($method==="DELETE") {
     // The sale amount leaves the debt even below zero: whatever the client already paid
     // for this sale stays as a credit balance that the next sale consumes
     if ($revertirDeuda) {
-        $stmtRevertDebt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_deb = COALESCE(cl_deb, 0) - ? WHERE cl_ide = ? AND cl_emp = ?');
+        $stmtRevertDebt = prepare_or_fail($con, 'UPDATE sap_cl00 SET cl_deb = COALESCE(cl_deb, 0) - CAST(? AS DECIMAL(12,2)) WHERE cl_ide = ? AND cl_emp = ?');
 
         $monto = floatval($venta['vt_mon']);
 
         $clienteVenta = intval($venta['vt_cli']);
 
-        mysqli_stmt_bind_param($stmtRevertDebt, 'dii', $monto, $clienteVenta, $userId);
+        mysqli_stmt_bind_param($stmtRevertDebt, 'dii', $monto, $clienteVenta, $companyId);
 
         if (!mysqli_stmt_execute($stmtRevertDebt)) {
             mysqli_rollback($con);
@@ -245,7 +250,7 @@ if ($method==="DELETE") {
 
     $stmtDelete = prepare_or_fail($con, 'DELETE FROM sap_vt00 WHERE vt_ide = ? AND vt_emp = ?');
 
-    mysqli_stmt_bind_param($stmtDelete, 'ii', $id, $userId);
+    mysqli_stmt_bind_param($stmtDelete, 'ii', $id, $companyId);
 
     if (!mysqli_stmt_execute($stmtDelete)) {
         mysqli_rollback($con);
