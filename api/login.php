@@ -8,7 +8,8 @@ $method = $_SERVER['REQUEST_METHOD'];
 
 // Checks the credentials and sends the login response: the user row (us_ide, us_nom, us_emp,
 // us_rol, us_act; never us_pas), the token, es_dueno and the permission codes (the whole
-// catalog for the owner). Unknown name -> 404, wrong password or inactive user -> 401.
+// catalog for the owner) and empresa_nombre (the company name, null when unset).
+// Unknown name -> 404, wrong password or inactive user -> 401.
 function login_response($con, $nombre, $pass) {
     $stmt = prepare_or_fail($con, 'SELECT us_ide, us_nom, us_pas, us_emp, us_rol, us_act FROM sap_us00 WHERE us_nom = ?');
     mysqli_stmt_bind_param($stmt, 's', $nombre);
@@ -47,6 +48,7 @@ function login_response($con, $nombre, $pass) {
         "token" => $token,
         "es_dueno" => $usuario['us_emp'] === $usuario['us_ide'],
         "permisos" => user_permissions($con, $usuario),
+        "empresa_nombre" => empresa_nombre($con, $usuario['us_emp']),
     ], 200);
 }
 

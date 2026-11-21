@@ -124,6 +124,23 @@ function parse_texto_opcional($value, $max) {
     return $largo > $max ? false : $value;
 }
 
+// Company data of a company (sap_em00, datos-empresa): ["em_nom","em_tel","em_dir"] or null
+// when the owner never saved it. Read by empresa.php and by the login/sesion responses.
+function empresa_datos($con, $companyId) {
+    $stmt = prepare_or_fail($con, 'SELECT em_nom, em_tel, em_dir FROM sap_em00 WHERE em_emp = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $companyId);
+    if (!mysqli_stmt_execute($stmt)) send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
+    $res = mysqli_stmt_get_result($stmt);
+    $row = $res ? mysqli_fetch_assoc($res) : null;
+    return $row ? $row : null;
+}
+
+// Name the app signs WhatsApp messages with: the company name, or null when unset
+function empresa_nombre($con, $companyId) {
+    $datos = empresa_datos($con, $companyId);
+    return $datos ? $datos['em_nom'] : null;
+}
+
 // Records a stock movement of the owner's product in sap_ms00 (historial de stock).
 // Call it right after changing pr_stk, inside the same transaction: ms_stk takes the
 // stock that the change left. $tipo: venta, venta_eliminada, llenado, ajuste, alta, and from

@@ -332,9 +332,11 @@ check('Owner login never returns us_pas', !array_key_exists('us_pas', $u));
 $tokC = login('Congre');
 if (!$tokA || !$tokC) exit(1);
 
+// empresa_nombre (migration 012) is the saved company name, or null when Ariza never saved it
+$arizaEmpresa = table_exists('sap_em00') ? (db_row('SELECT em_nom FROM sap_em00 WHERE em_emp = ?', 'i', [$arizaId])['em_nom'] ?? null) : null;
 $r = http('GET', 'sesion.php', [], null, $tokA);
 expect_status('Owner GET sesion', 200, $r);
-check('Owner sesion fields', $r[1] === ['success' => true, 'us_ide' => $arizaId, 'us_nom' => 'Ariza', 'es_dueno' => true, 'permisos' => CATALOG], short($r[2]));
+check('Owner sesion fields', $r[1] === ['success' => true, 'us_ide' => $arizaId, 'us_nom' => 'Ariza', 'es_dueno' => true, 'permisos' => CATALOG, 'empresa_nombre' => $arizaEmpresa], short($r[2]));
 expect_status('GET sesion without token -> 401', 401, http('GET', 'sesion.php'));
 
 // ---------------------------------------------------------------- 2. owner data unchanged
@@ -470,7 +472,7 @@ check('Vendedor login usuario has company and role', (int) ($u['us_ide'] ?? 0) =
     && (int) ($u['us_rol'] ?? 0) === $rolId && (int) ($u['us_act'] ?? 0) === 1 && !array_key_exists('us_pas', $u), short($r[2]));
 if (!$tokV) exit(1);
 $r = http('GET', 'sesion.php', [], null, $tokV);
-check('Vendedor sesion fields', $r[1] === ['success' => true, 'us_ide' => $vendId, 'us_nom' => $vendName, 'es_dueno' => false, 'permisos' => VENDEDOR], short($r[2]));
+check('Vendedor sesion fields', $r[1] === ['success' => true, 'us_ide' => $vendId, 'us_nom' => $vendName, 'es_dueno' => false, 'permisos' => VENDEDOR, 'empresa_nombre' => $arizaEmpresa], short($r[2]));
 
 // ---------------------------------------------------------------- 6. vendedor sees and writes the company data
 
