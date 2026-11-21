@@ -398,6 +398,21 @@ check('PUT applied the difference: pr_stk 19 -> 17', stock($retId) === [17, 3], 
 check('PUT recorded the revert and the new compra', array_slice(movimientos($retId), -2) === [['compra_eliminada', -4, 15], ['compra', 2, 17]], json_encode(movimientos($retId)));
 check('PUT response has the new fields', money($r[1]['gasto']['gs_mon'] ?? null) === 950.0 && ($r[1]['gasto']['gs_can'] ?? 0) === 2, short($r[2]));
 
+// Only the amount, date or description change: the stock is left alone, so a purchase whose
+// units were already sold can still be corrected
+db_exec('UPDATE sap_pr00 SET pr_stk = 0 WHERE pr_ide = ?', 'i', [$retId]);
+$movs = count(movimientos($retId));
+$r = http('PUT', 'gastos.php', [], ['id' => $gLleno, 'categoria' => 'compra_producto', 'monto' => 990, 'productoId' => $retId,
+    'cantidad' => 2, 'estado' => 'lleno', 'descripcion' => 'Factura 12'], $tokA);
+expect_status('PUT that keeps producto, cantidad and estado with sold stock', 200, $r);
+check('PUT without a stock change leaves stock and movements alone', stock($retId) === [0, 3] && count(movimientos($retId)) === $movs
+    && money($r[1]['gasto']['gs_mon'] ?? null) === 990.0 && ($r[1]['gasto']['gs_des'] ?? '') === 'Factura 12', short($r[2]));
+db_exec('UPDATE sap_pr00 SET pr_stk = 17 WHERE pr_ide = ?', 'i', [$retId]);
+$n = gastos_count();
+expect_status('POST compra with cantidad over 100000 -> 400', 400, http('POST', 'gastos.php', [], ['categoria' => 'compra_producto',
+    'monto' => 1, 'productoId' => $noRetId, 'cantidad' => 100001], $tokA));
+check('Over-limit cantidad stored nothing', gastos_count() === $n && stock($noRetId) === [9, 0]);
+
 $r = http('PUT', 'gastos.php', [], ['id' => $gVacio, 'categoria' => 'otro', 'monto' => 300], $tokA);
 expect_status('PUT compra vacio -> otro', 200, $r);
 check('PUT to a non-stock categoria reverted the empties: pr_vac 3 -> 0', stock($retId) === [17, 0], json_encode(stock($retId)));

@@ -5,8 +5,9 @@
 // POST {categoria, monto, fecha?, descripcion?, repartoId?, productoId?, cantidad?, estado?}:
 //   creates one (fecha defaults to today). Needs gastos.cargar, plus stock.editar for the
 //   categories that move stock.
-// PUT {id, ...the same fields}: replaces one (fecha defaults to its previous date). The previous
-//   stock effect is reverted before the new one is applied. Needs gastos.editar, plus
+// PUT {id, ...the same fields}: replaces one (fecha defaults to its previous date). When the
+//   category, product, quantity or state change, the previous stock effect is reverted before
+//   the new one is applied; otherwise the stock is not touched. Needs gastos.editar, plus
 //   stock.editar when the previous or the new gasto moves stock.
 // DELETE ?id=: deletes one and reverts its stock effect. Needs gastos.editar (+ stock.editar).
 //
@@ -31,9 +32,15 @@ const GASTO_CATEGORIAS = ['compra_producto', 'recarga_envases', 'vehiculo', 'com
 const GASTO_CATEGORIAS_STOCK = ['compra_producto', 'recarga_envases'];
 const GASTO_MONTO_MAX = 9999999999.99;
 const GASTO_DESCRIPCION_MAX = 255;
+const GASTO_CANTIDAD_MAX = 100000;
 
 function mueve_stock($categoria) {
     return in_array($categoria, GASTO_CATEGORIAS_STOCK, true);
+}
+
+// Same category, product, quantity and state: the stock effect does not change
+function mismo_efecto($a, $b) {
+    return $a['cat'] === $b['cat'] && $a['pro'] === $b['pro'] && $a['can'] === $b['can'] && $a['est'] === $b['est'];
 }
 
 // Rolls back the open transaction and answers the error
@@ -141,8 +148,8 @@ function leer_gasto($con, $companyId, $data, $fechaPorDefecto) {
 
     $cantidad = isset($data['cantidad']) ? parse_non_negative_int($data['cantidad']) : null;
 
-    if (!$productoId || !$cantidad) {
-        send_json(["success"=>false,"error"=>"Datos inválidos: productoId y cantidad (entero mayor a 0) son requeridos"],400);
+    if (!$productoId || !$cantidad || $cantidad > GASTO_CANTIDAD_MAX) {
+        send_json(["success"=>false,"error"=>"Datos inválidos: productoId y cantidad (entero de 1 a " . GASTO_CANTIDAD_MAX . ") son requeridos"],400);
     }
 
     $stmt = prepare_or_fail($con, 'SELECT pr_ide, pr_nom, pr_ret FROM sap_pr00 WHERE pr_ide = ? AND pr_emp = ? AND deleted_at IS NULL');
@@ -354,9 +361,16 @@ if ($method === 'PUT') {
 
     if (!$anterior) fallar($con, "Gasto no encontrado", 404);
 
-    efecto_stock($con, $companyId, $anterior, -1);
+    // the gasto may have become a stock one since the first read (nothing is written yet)
+    if (mueve_stock($anterior['cat'])) require_permission('stock.editar');
 
-    efecto_stock($con, $companyId, $gasto, 1);
+    // Only the amount, date, description or reparto changed: the stock stays as it is, so a
+    // purchase whose units were already sold can still be corrected
+    if (!mismo_efecto($anterior, $gasto)) {
+        efecto_stock($con, $companyId, $anterior, -1);
+
+        efecto_stock($con, $companyId, $gasto, 1);
+    }
 
     $stmt = prepare_or_fail($con, 'UPDATE sap_gs00 SET gs_cat = ?, gs_mon = ?, gs_fec = ?, gs_des = ?, gs_rep = ?, gs_pro = ?, gs_can = ?, gs_est = ?
         WHERE gs_ide = ? AND gs_emp = ?');
@@ -387,6 +401,8 @@ if ($method === 'DELETE') {
     $anterior = buscar_gasto($con, $companyId, $id, true);
 
     if (!$anterior) fallar($con, "Gasto no encontrado", 404);
+
+    if (mueve_stock($anterior['cat'])) require_permission('stock.editar');
 
     efecto_stock($con, $companyId, $anterior, -1);
 
