@@ -101,7 +101,7 @@ Every user belongs to a company: `sap_us00.us_emp` is the owner's `us_ide` (the 
 - Every request re-reads the user from the database: old tokens keep working, a role change applies at once, and a deactivated (`us_act = 0`) or deleted user gets 401 `Invalid or expired token`.
 - Missing permission: 403 `{"success":false,"error":"Forbidden: missing permission","permiso":"<code>"}` (`"permiso":"admin"` for the admin API). With "any of", the first code is reported.
 
-Permission catalog: `ventas.ver`, `ventas.cargar`, `ventas.eliminar`, `repartos.ver`, `repartos.gestionar`, `clientes.ver`, `clientes.editar`, `cobros.ver`, `cobros.cargar`, `stock.ver`, `stock.editar`, `caja.ver`. Migration 011 seeds one `Vendedor` role per owner with `ventas.ver`, `ventas.cargar`, `repartos.ver`, `repartos.gestionar`, `clientes.ver`, `clientes.editar`.
+Permission catalog: `ventas.ver`, `ventas.cargar`, `ventas.eliminar`, `repartos.ver`, `repartos.gestionar`, `clientes.ver`, `clientes.editar`, `cobros.ver`, `cobros.cargar`, `stock.ver`, `stock.editar`, `caja.ver`, and from migration 014 `gastos.ver`, `gastos.cargar`, `gastos.editar` (granted to no role by default). Migration 011 seeds one `Vendedor` role per owner with `ventas.ver`, `ventas.cargar`, `repartos.ver`, `repartos.gestionar`, `clientes.ver`, `clientes.editar`.
 
 Endpoint -> permission ("any of" for reference reads that several screens need):
 
@@ -132,6 +132,9 @@ Endpoint -> permission ("any of" for reference reads that several screens need):
 | `pagos.php` | GET `?mes=` (caja) | `caja.ver` |
 | `cajaMes.php` | GET | `caja.ver` |
 | `reporte.php` | GET (sales and payments report) | `caja.ver` |
+| `gastos.php` | GET | `gastos.ver` |
+| `gastos.php` | POST | `gastos.cargar` (+ `stock.editar` for `compra_producto` and `recarga_envases`) |
+| `gastos.php` | PUT, DELETE | `gastos.editar` (+ `stock.editar` when the previous or new gasto moves stock) |
 | `sesion.php` | GET | any valid token of an active user |
 | `usuarios.php`, `roles.php` | every method | owner only (`admin`) |
 
@@ -155,3 +158,13 @@ Requiere token y el permiso `caja.ver` (reemplaza a la pantalla de caja). Datos 
 - Montos: el guardado en la venta (`vt_mon`). Las líneas viejas sin monto guardado se valoran al precio actual del producto y se marcan `estimado` (contadas en `lineasEstimadas`).
 - Una venta es un registro: las líneas con el mismo cliente y fecha/hora. `cobrado` suma los pagos (`sap_pg00`) del rango; `primerCobro` es el primer pago registrado del usuario (antes de la migración 007 los pagos no se guardaban).
 - Fechas: la conexión fija la zona horaria de MySQL igual a la de PHP (Argentina), así `pg_fec` y `vt_fec` usan el mismo reloj.
+
+Gastos (api/gastos.php, migración 014)
+--------------------------------------
+Gastos del negocio de la empresa del usuario (`sap_gs00`). Categorías: `compra_producto`, `recarga_envases`, `vehiculo`, `combustible`, `otro`.
+
+- `GET ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD[&categoria=]` (por defecto el mes actual) -> `{"desde","hasta","gastos":[{"gs_ide","gs_cat","gs_mon","gs_fec","gs_des","gs_rep","gs_pro","pr_nom","gs_can","gs_est","gs_us","us_nom"}],"total"}`, del más nuevo al más viejo. 400 ante fechas o categoría inválidas.
+- `POST {"categoria","monto","fecha"?,"descripcion"?,"repartoId"?,"productoId"?,"cantidad"?,"estado"?}` -> 201 `{"gasto"}`. `fecha` por defecto hoy. `monto` > 0 con hasta 2 decimales; `descripcion` hasta 255 caracteres; `repartoId` es un reparto de la empresa (404 si no). `productoId` y `cantidad` (> 0) solo y siempre en `compra_producto` y `recarga_envases`; `estado` (`lleno`/`vacio`) solo en la compra de un producto retornable.
+- `PUT {"id", ...los mismos campos}` reemplaza el gasto (`fecha` por defecto la que tenía); `DELETE ?id=` lo borra. 404 si el gasto no es de la empresa.
+- Stock, en la misma transacción que el gasto: compra retornable `lleno` -> `pr_stk` +cantidad, `vacio` -> `pr_vac` +cantidad; compra no retornable -> `pr_stk` +cantidad; recarga (solo retornables) -> `pr_vac` -cantidad y `pr_stk` +cantidad (lo mismo que `envases.php` `llenar`). PUT primero deshace el efecto anterior y DELETE lo deshace. Cada cambio de `pr_stk` queda en `sap_ms00` (`compra`, `llenado`, `compra_eliminada`, `llenado_eliminado`).
+- 409 sin cambios cuando el stock no alcanza: recarga con menos envases vacíos que la cantidad (`No hay suficientes envases vacíos`), o deshacer un gasto cuyo stock ya se vendió o cuyo producto fue eliminado.

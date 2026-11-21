@@ -41,7 +41,8 @@ const PASSWORD = 'test1234';
 const MARKER = 'zz_roles_test_';
 const FORBIDDEN = 'Forbidden: missing permission';
 const CATALOG = ['ventas.ver', 'ventas.cargar', 'ventas.eliminar', 'repartos.ver', 'repartos.gestionar', 'clientes.ver',
-    'clientes.editar', 'cobros.ver', 'cobros.cargar', 'stock.ver', 'stock.editar', 'caja.ver'];
+    'clientes.editar', 'cobros.ver', 'cobros.cargar', 'stock.ver', 'stock.editar', 'caja.ver',
+    'gastos.ver', 'gastos.cargar', 'gastos.editar'];
 const VENDEDOR = ['ventas.ver', 'ventas.cargar', 'repartos.ver', 'repartos.gestionar', 'clientes.ver', 'clientes.editar'];
 
 $failures = 0;
