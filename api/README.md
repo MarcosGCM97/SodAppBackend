@@ -178,3 +178,11 @@ Requiere token. Una fila por empresa en `sap_em00` (`em_emp` = id del dueño). L
 
 - `GET`: cualquier usuario de la empresa → `{"empresa": {"em_nom","em_tel","em_dir"} | null}` (`null` si el dueño nunca la guardó).
 - `PUT` `{"nombre","telefono"?,"direccion"?}`: solo el dueño (si no, 403 `"permiso":"admin"`). Crea o reemplaza los datos y responde `{"empresa": {...}}`. `nombre` obligatorio, 1-80 caracteres (sin espacios al borde); `telefono` hasta 30, solo números, espacios, `+` y `-`; `direccion` hasta 150. Un teléfono o dirección vacío o ausente se guarda `null`. 400 ante datos inválidos.
+
+Plantillas de mensajes de WhatsApp (api/mensajes.php, migración 013)
+--------------------------------------------------------------------
+Requiere token. Una fila por empresa y tipo en `sap_msj00` (`ms_emp` = id del dueño, `ms_tip` = `deuda`, `envases` o `venta`). La app reemplaza las variables al enviar y usa su texto por defecto para los tipos sin plantilla.
+
+- `GET`: cualquier usuario de la empresa → `{"plantillas": {"deuda": "..", "venta": ".."}}` (solo los tipos guardados; `{}` sin plantillas).
+- `PUT` `{"tipo","texto"}`: solo el dueño (si no, 403 `"permiso":"admin"`). Crea o reemplaza la plantilla del tipo y responde `{"plantillas": {...}}` con todas. `texto` obligatorio, 1-1000 caracteres (sin espacios al borde). Variables permitidas: `deuda` `{cliente}`, `{saldo}`, `{empresa}`; `envases` `{cliente}`, `{envases}`, `{empresa}`; `venta` `{cliente}`, `{productos}`, `{total}`, `{saldo}`, `{empresa}`. Otra `{palabra}` → 400 `Variable no permitida en <tipo>: {palabra}. Permitidas: ...`; llaves sin una palabra adentro son texto. Tipo desconocido → 400 `Tipo inválido: deuda, envases o venta`.
+- `DELETE ?tipo=<tipo>`: solo el dueño. Borra la plantilla (la app vuelve al texto por defecto) y responde `{"plantillas": {...}}`; borrar una que no existe no es error.
