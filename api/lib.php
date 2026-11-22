@@ -126,7 +126,8 @@ function parse_texto_opcional($value, $max) {
 
 // Records a stock movement of the owner's product in sap_ms00 (historial de stock).
 // Call it right after changing pr_stk, inside the same transaction: ms_stk takes the
-// stock that the change left. $tipo: venta, venta_eliminada, llenado, ajuste, alta.
+// stock that the change left. $tipo: venta, venta_eliminada, llenado, ajuste, alta, and from
+// gastos.php compra, compra_eliminada, llenado_eliminado.
 // Returns false when the insert fails, so the caller can roll back.
 function record_stock_movement($con, $companyId, $nombre, $tipo, $cantidad, $ventaId = null) {
     $stmt = prepare_or_fail($con, 'INSERT INTO sap_ms00 (ms_pro, ms_emp, ms_tip, ms_can, ms_stk, ms_vta, ms_fec)
@@ -135,6 +136,23 @@ function record_stock_movement($con, $companyId, $nombre, $tipo, $cantidad, $ven
     mysqli_stmt_bind_param($stmt, 'siisi', $tipo, $cantidad, $ventaId, $nombre, $companyId);
 
     return mysqli_stmt_execute($stmt);
+}
+
+// Refills $cantidad empty containers of an owned returnable product (pr_vac -> pr_stk) and
+// records its "llenado" movement. One atomic UPDATE that only applies while enough empties
+// remain. The caller owns the transaction: call it after mysqli_autocommit($con, false).
+// Returns 'ok', 'sin_vacios' (fewer empties than $cantidad, nothing changed) or 'error'.
+function llenar_envases($con, $companyId, $productoId, $nombre, $cantidad) {
+    $stmt = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_vac = pr_vac - ?, pr_stk = COALESCE(pr_stk, 0) + ?
+        WHERE pr_ide = ? AND pr_emp = ? AND deleted_at IS NULL AND pr_ret = 1 AND pr_vac >= ?');
+
+    mysqli_stmt_bind_param($stmt, 'iiiii', $cantidad, $cantidad, $productoId, $companyId, $cantidad);
+
+    if (!mysqli_stmt_execute($stmt)) return 'error';
+
+    if (mysqli_stmt_affected_rows($stmt) === 0) return 'sin_vacios';
+
+    return record_stock_movement($con, $companyId, $nombre, 'llenado', $cantidad) ? 'ok' : 'error';
 }
 
 // Registers the sale lines of a cliente: one sap_vt00 row per line, stock decrement with its
