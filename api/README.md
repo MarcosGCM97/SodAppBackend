@@ -133,7 +133,7 @@ Endpoint -> permission ("any of" for reference reads that several screens need):
 | `cajaMes.php` | GET | `caja.ver` |
 | `reporte.php` | GET (sales and payments report) | `caja.ver` |
 | `gastos.php` | GET | `gastos.ver` |
-| `gastos.php` | POST | `gastos.cargar` (+ `stock.editar` for `compra_producto` and `recarga_envases`) |
+| `gastos.php` | POST | `gastos.cargar` (+ `stock.editar` when it moves stock: `recarga_envases` and `compra_producto` with a product) |
 | `gastos.php` | PUT, DELETE | `gastos.editar` (+ `stock.editar` when the previous or new gasto moves stock) |
 | `sesion.php` | GET | any valid token of an active user |
 | `usuarios.php`, `roles.php` | every method | owner only (`admin`) |
@@ -164,7 +164,7 @@ Gastos (api/gastos.php, migración 014)
 Gastos del negocio de la empresa del usuario (`sap_gs00`). Categorías: `compra_producto`, `recarga_envases`, `vehiculo`, `combustible`, `otro`.
 
 - `GET ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD[&categoria=]` (por defecto el mes actual) -> `{"desde","hasta","gastos":[{"gs_ide","gs_cat","gs_mon","gs_fec","gs_des","gs_rep","gs_pro","pr_nom","gs_can","gs_est","gs_us","us_nom"}],"total"}`, del más nuevo al más viejo. 400 ante fechas o categoría inválidas.
-- `POST {"categoria","monto","fecha"?,"descripcion"?,"repartoId"?,"productoId"?,"cantidad"?,"estado"?}` -> 201 `{"gasto"}`. `fecha` por defecto hoy. `monto` > 0 con hasta 2 decimales; `descripcion` hasta 255 caracteres; `repartoId` es un reparto de la empresa (404 si no). `productoId` y `cantidad` (> 0) solo y siempre en `compra_producto` y `recarga_envases`; `estado` (`lleno`/`vacio`) solo en la compra de un producto retornable.
+- `POST {"categoria","monto","fecha"?,"descripcion"?,"repartoId"?,"productoId"?,"cantidad"?,"estado"?}` -> 201 `{"gasto"}`. `fecha` por defecto hoy. `monto` > 0 con hasta 2 decimales; `descripcion` hasta 255 caracteres; `repartoId` es un reparto de la empresa (404 si no). `productoId` y `cantidad` (> 0) siempre en `recarga_envases` y opcionales en `compra_producto` (sin producto es una compra fuera del catálogo: se guarda sin mover stock ni pedir `stock.editar`); no van en las demás categorías; `estado` (`lleno`/`vacio`) solo en la compra de un producto retornable.
 - `PUT {"id", ...los mismos campos}` reemplaza el gasto (`fecha` por defecto la que tenía); `DELETE ?id=` lo borra. 404 si el gasto no es de la empresa.
 - Stock, en la misma transacción que el gasto: compra retornable `lleno` -> `pr_stk` +cantidad, `vacio` -> `pr_vac` +cantidad; compra no retornable -> `pr_stk` +cantidad; recarga (solo retornables) -> `pr_vac` -cantidad y `pr_stk` +cantidad (lo mismo que `envases.php` `llenar`). PUT deshace el efecto anterior y aplica el nuevo solo si cambian categoría, producto, cantidad o estado (corregir monto, fecha o descripción no toca el stock); DELETE lo deshace. `cantidad` va de 1 a 100000. Cada cambio de `pr_stk` queda en `sap_ms00` (`compra`, `llenado`, `compra_eliminada`, `llenado_eliminado`).
 - 409 sin cambios cuando el stock no alcanza: recarga con menos envases vacíos que la cantidad (`No hay suficientes envases vacíos`), o deshacer un gasto cuyo stock ya se vendió o cuyo producto fue eliminado.

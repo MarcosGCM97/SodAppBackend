@@ -318,6 +318,7 @@ $bad = [
     'compra with an unknown estado' => ['categoria' => 'compra_producto', 'monto' => 1, 'productoId' => $retId, 'cantidad' => 1, 'estado' => 'roto'],
     'compra vacio of a non-returnable' => ['categoria' => 'compra_producto', 'monto' => 1, 'productoId' => $noRetId, 'cantidad' => 1, 'estado' => 'vacio'],
     'recarga of a non-returnable' => ['categoria' => 'recarga_envases', 'monto' => 1, 'productoId' => $noRetId, 'cantidad' => 1],
+    'recarga without producto' => ['categoria' => 'recarga_envases', 'monto' => 1],
 ];
 foreach ($bad as $label => $body) {
     expect_status("POST $label -> 400", 400, http('POST', 'gastos.php', [], $body, $tokA));
@@ -362,6 +363,32 @@ $r = http('POST', 'gastos.php', [], ['categoria' => 'recarga_envases', 'monto' =
 check('recarga with fewer empties -> 409 with the message', $r[0] === 409 && ($r[1]['error'] ?? '') === 'No hay suficientes envases vacíos', short($r[2]));
 check('Rejected recarga stored no gasto and moved no stock', gastos_count() === $n && stock($retId) === [19, 3] && count(movimientos($retId)) === 2);
 
+echo "\n# A compra without producto is a plain expense: stored, no stock effect\n";
+
+$movsRet = count(movimientos($retId));
+$movsNoRet = count(movimientos($noRetId));
+$r = http('POST', 'gastos.php', [], ['categoria' => 'compra_producto', 'monto' => 700, 'fecha' => '2097-04-10',
+    'descripcion' => 'Bidones de otra marca'], $tokA);
+expect_status('POST compra without producto', 201, $r);
+$gSinProducto = (int) ($r[1]['gasto']['gs_ide'] ?? 0);
+check('compra without producto has no product fields', array_intersect_key($r[1]['gasto'] ?? [], array_flip(['gs_cat', 'gs_pro', 'pr_nom', 'gs_can', 'gs_est']))
+    === ['gs_cat' => 'compra_producto', 'gs_pro' => null, 'pr_nom' => null, 'gs_can' => null, 'gs_est' => null], short($r[2]));
+check('compra without producto moved no stock and recorded no movement', stock($retId) === [19, 3] && stock($noRetId) === [9, 0]
+    && count(movimientos($retId)) === $movsRet && count(movimientos($noRetId)) === $movsNoRet);
+
+$r = http('POST', 'gastos.php', [], ['categoria' => 'compra_producto', 'monto' => 40, 'fecha' => '2097-04-10', 'productoId' => $noRetId, 'cantidad' => 2], $tokA);
+$gConProducto = (int) ($r[1]['gasto']['gs_ide'] ?? 0);
+check('compra with producto of the same check: pr_stk 9 -> 11', $r[0] === 201 && stock($noRetId) === [11, 0], short($r[2]));
+$r = http('PUT', 'gastos.php', [], ['id' => $gConProducto, 'categoria' => 'compra_producto', 'monto' => 40], $tokA);
+expect_status('PUT compra with producto -> without producto', 200, $r);
+check('PUT without producto reverted the purchase: pr_stk 11 -> 9', stock($noRetId) === [9, 0]
+    && array_slice(movimientos($noRetId), -1) === [['compra_eliminada', -2, 9]], json_encode(movimientos($noRetId)));
+check('PUT without producto cleared the product fields', db_row('SELECT gs_cat, gs_pro, gs_can, gs_est FROM sap_gs00 WHERE gs_ide = ?', 'i', [$gConProducto])
+    === ['gs_cat' => 'compra_producto', 'gs_pro' => null, 'gs_can' => null, 'gs_est' => null]);
+$movsNoRet = count(movimientos($noRetId));
+expect_status('DELETE compra without producto', 200, http('DELETE', 'gastos.php', ['id' => $gConProducto], null, $tokA));
+check('DELETE compra without producto moved no stock', stock($noRetId) === [9, 0] && count(movimientos($noRetId)) === $movsNoRet);
+
 // ---------------------------------------------------------------- 4. GET list, filters, total
 
 echo "\n# GET gastos: period and category filters, total, company scope\n";
@@ -370,19 +397,27 @@ $r = http('GET', 'gastos.php', ['desde' => '2097-03-01', 'hasta' => '2097-03-31'
 expect_status('GET march 2097', 200, $r);
 check('GET period lists only the gasto of that period', array_column($r[1]['gastos'] ?? [], 'gs_ide') === [$g1Id] && money($r[1]['total'] ?? null) === 15000.5, short($r[2]));
 $hoy = date('Y-m-d');
+// Ariza may already have gastos of today in the database (manual tests): only the ones this
+// test created are compared, and the expected totals include the previous ones
+$creadosPorElTest = function ($r) use ($maxGs) {
+    $ids = array_values(array_filter(array_column($r[1]['gastos'] ?? [], 'gs_ide'), function ($id) use ($maxGs) { return $id > $maxGs; }));
+    sort($ids);
+    return $ids;
+};
+$totalPrevio = function ($categoria) use ($maxGs, $arizaId, $hoy) {
+    return (float) db_row('SELECT COALESCE(SUM(gs_mon), 0) AS t FROM sap_gs00 WHERE gs_ide <= ? AND gs_emp = ? AND gs_fec = ? AND (? = \'\' OR gs_cat = ?)',
+        'iisss', [$maxGs, $arizaId, $hoy, $categoria, $categoria])['t'];
+};
 $r = http('GET', 'gastos.php', ['desde' => $hoy, 'hasta' => $hoy], null, $tokA);
-$ids = array_column($r[1]['gastos'] ?? [], 'gs_ide');
-sort($ids);
 $esperados = [$g2Id, $gLleno, $gVacio, $gNoRet, $gRecarga];
 sort($esperados);
-check('GET today lists the gastos of today', $ids === $esperados, short($r[2]));
-check('GET total sums the listed amounts', money($r[1]['total'] ?? null) === 3820.0, short($r[2]));
+check('GET today lists the gastos of today', $creadosPorElTest($r) === $esperados, short($r[2]));
+check('GET total sums the listed amounts', money($r[1]['total'] ?? null) === round(3820.0 + $totalPrevio(''), 2), short($r[2]));
 $r = http('GET', 'gastos.php', ['desde' => $hoy, 'hasta' => $hoy, 'categoria' => 'compra_producto'], null, $tokA);
-$ids = array_column($r[1]['gastos'] ?? [], 'gs_ide');
-sort($ids);
 $compras = [$gLleno, $gVacio, $gNoRet];
 sort($compras);
-check('GET categoria filter', $ids === $compras && money($r[1]['total'] ?? null) === 1320.0, short($r[2]));
+check('GET categoria filter', $creadosPorElTest($r) === $compras && money($r[1]['total'] ?? null) === round(1320.0 + $totalPrevio('compra_producto'), 2)
+    && array_unique(array_column($r[1]['gastos'] ?? [], 'gs_cat')) === ['compra_producto'], short($r[2]));
 $r = http('GET', 'gastos.php', [], null, $tokA);
 check('GET without period defaults to the current month', $r[0] === 200 && ($r[1]['desde'] ?? '') === date('Y-m-01') && ($r[1]['hasta'] ?? '') === date('Y-m-t')
     && in_array($g2Id, array_column($r[1]['gastos'] ?? [], 'gs_ide'), true), short($r[2]));
@@ -465,6 +500,8 @@ expect_status('User with gastos.cargar POSTs a combustible gasto', 201, $r);
 check('Gasto of the user is owned by the company and names the user', ($r[1]['gasto']['gs_us'] ?? 0) === (int) db_row('SELECT us_ide FROM sap_us00 WHERE us_nom = ?', 's', [$vendName])['us_ide']
     && (int) db_row('SELECT gs_emp FROM sap_gs00 WHERE gs_ide = ?', 'i', [(int) ($r[1]['gasto']['gs_ide'] ?? 0)])['gs_emp'] === $arizaId, short($r[2]));
 expect_status('User with gastos.ver GETs the company gastos', 200, http('GET', 'gastos.php', [], null, $tokV));
+expect_status('User without stock.editar POSTs a compra without producto', 201,
+    http('POST', 'gastos.php', [], ['categoria' => 'compra_producto', 'monto' => 10, 'fecha' => '2097-04-10'], $tokV));
 $n = gastos_count();
 expect_forbidden('User POSTs a compra without stock.editar', 'stock.editar', http('POST', 'gastos.php', [], ['categoria' => 'compra_producto', 'monto' => 1, 'productoId' => $noRetId, 'cantidad' => 1], $tokV));
 expect_forbidden('User POSTs a recarga without stock.editar', 'stock.editar', http('POST', 'gastos.php', [], ['categoria' => 'recarga_envases', 'monto' => 1, 'productoId' => $retId, 'cantidad' => 1], $tokV));
@@ -478,6 +515,12 @@ expect_forbidden('User POSTs without gastos.cargar', 'gastos.cargar', http('POST
 expect_forbidden('User with gastos.editar PUTs a stock gasto without stock.editar', 'stock.editar',
     http('PUT', 'gastos.php', [], ['id' => $gLleno, 'categoria' => 'otro', 'monto' => 1], $tokV));
 expect_status('User with gastos.editar PUTs a non-stock gasto', 200, http('PUT', 'gastos.php', [], ['id' => $g1Id, 'categoria' => 'otro', 'monto' => 1], $tokV));
+expect_status('User with gastos.editar PUTs a compra without producto', 200,
+    http('PUT', 'gastos.php', [], ['id' => $gSinProducto, 'categoria' => 'compra_producto', 'monto' => 750], $tokV));
+expect_forbidden('User without stock.editar PUTs a compra without producto into one with producto', 'stock.editar',
+    http('PUT', 'gastos.php', [], ['id' => $gSinProducto, 'categoria' => 'compra_producto', 'monto' => 1, 'productoId' => $noRetId, 'cantidad' => 1], $tokV));
+check('Forbidden PUT kept the compra without producto', db_row('SELECT gs_mon, gs_pro FROM sap_gs00 WHERE gs_ide = ?', 'i', [$gSinProducto])
+    === ['gs_mon' => '750.00', 'gs_pro' => null] && stock($noRetId) === [3, 0]);
 
 echo "\n$passes passed, $failures failed\n";
 exit($failures > 0 ? 1 : 0);

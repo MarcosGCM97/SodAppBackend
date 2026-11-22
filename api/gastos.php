@@ -3,8 +3,9 @@
 // GET ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD[&categoria=]: gastos of the period (default: the
 //   current month), newest first, with their total. Needs gastos.ver.
 // POST {categoria, monto, fecha?, descripcion?, repartoId?, productoId?, cantidad?, estado?}:
-//   creates one (fecha defaults to today). Needs gastos.cargar, plus stock.editar for the
-//   categories that move stock.
+//   creates one (fecha defaults to today). Needs gastos.cargar, plus stock.editar when it
+//   moves stock. A compra_producto without productoId, cantidad and estado is a purchase
+//   outside the catalog: stored with no stock effect (recarga_envases always needs a product).
 // PUT {id, ...the same fields}: replaces one (fecha defaults to its previous date). When the
 //   category, product, quantity or state change, the previous stock effect is reverted before
 //   the new one is applied; otherwise the stock is not touched. Needs gastos.editar, plus
@@ -34,8 +35,14 @@ const GASTO_MONTO_MAX = 9999999999.99;
 const GASTO_DESCRIPCION_MAX = 255;
 const GASTO_CANTIDAD_MAX = 100000;
 
-function mueve_stock($categoria) {
+// Categories that may carry a product (a compra_producto without product is a plain expense)
+function lleva_producto($categoria) {
     return in_array($categoria, GASTO_CATEGORIAS_STOCK, true);
+}
+
+// The gasto moves stock: a stock category with a product
+function mueve_stock($gasto) {
+    return lleva_producto($gasto['cat']) && $gasto['pro'] !== null;
 }
 
 // Same category, product, quantity and state: the stock effect does not change
@@ -101,8 +108,6 @@ function leer_gasto($con, $companyId, $data, $fechaPorDefecto) {
         send_json(["success"=>false,"error"=>"Categoría inválida: debe ser una de " . implode(', ', GASTO_CATEGORIAS)],400);
     }
 
-    if (mueve_stock($categoria)) require_permission('stock.editar');
-
     $monto = isset($data['monto']) ? parse_monto($data['monto']) : null;
 
     if ($monto === null) send_json(["success"=>false,"error"=>"Monto inválido: debe ser mayor a 0 y con hasta 2 decimales"],400);
@@ -138,11 +143,16 @@ function leer_gasto($con, $companyId, $data, $fechaPorDefecto) {
 
     $tieneProducto = isset($data['productoId']) || isset($data['cantidad']) || isset($data['estado']);
 
-    if (!mueve_stock($categoria)) {
+    if (!lleva_producto($categoria)) {
         if ($tieneProducto) send_json(["success"=>false,"error"=>"La categoría $categoria no lleva producto, cantidad ni estado"],400);
 
         return $gasto;
     }
+
+    // A purchase of something outside the catalog: stored with its amount and description only
+    if ($categoria === 'compra_producto' && !$tieneProducto) return $gasto;
+
+    require_permission('stock.editar');
 
     $productoId = isset($data['productoId']) ? parse_non_negative_int($data['productoId']) : null;
 
@@ -191,7 +201,7 @@ function leer_gasto($con, $companyId, $data, $fechaPorDefecto) {
 // Applies ($signo 1) or reverts ($signo -1) the stock effect of a gasto inside the open
 // transaction. On failure it rolls back and sends 409 or 500.
 function efecto_stock($con, $companyId, $gasto, $signo) {
-    if (!mueve_stock($gasto['cat'])) return;
+    if (!mueve_stock($gasto)) return;
 
     $cantidad = $gasto['can'];
 
@@ -350,7 +360,7 @@ if ($method === 'PUT') {
 
     if (!$anterior) send_json(["success"=>false,"error"=>"Gasto no encontrado"],404);
 
-    if (mueve_stock($anterior['cat'])) require_permission('stock.editar');
+    if (mueve_stock($anterior)) require_permission('stock.editar');
 
     $gasto = leer_gasto($con, $companyId, $data, $anterior['fec']);
 
@@ -362,7 +372,7 @@ if ($method === 'PUT') {
     if (!$anterior) fallar($con, "Gasto no encontrado", 404);
 
     // the gasto may have become a stock one since the first read (nothing is written yet)
-    if (mueve_stock($anterior['cat'])) require_permission('stock.editar');
+    if (mueve_stock($anterior)) require_permission('stock.editar');
 
     // Only the amount, date, description or reparto changed: the stock stays as it is, so a
     // purchase whose units were already sold can still be corrected
@@ -394,7 +404,7 @@ if ($method === 'DELETE') {
 
     if (!$anterior) send_json(["success"=>false,"error"=>"Gasto no encontrado"],404);
 
-    if (mueve_stock($anterior['cat'])) require_permission('stock.editar');
+    if (mueve_stock($anterior)) require_permission('stock.editar');
 
     mysqli_autocommit($con, false);
 
@@ -402,7 +412,7 @@ if ($method === 'DELETE') {
 
     if (!$anterior) fallar($con, "Gasto no encontrado", 404);
 
-    if (mueve_stock($anterior['cat'])) require_permission('stock.editar');
+    if (mueve_stock($anterior)) require_permission('stock.editar');
 
     efecto_stock($con, $companyId, $anterior, -1);
 
