@@ -90,28 +90,18 @@ if ($method === 'POST') {
 
     $productoId = intval($producto['pr_ide']);
 
-    // Single atomic statement: only applies while enough empties remain
-    $stmt = prepare_or_fail($con, 'UPDATE sap_pr00 SET pr_vac = pr_vac - ?, pr_stk = COALESCE(pr_stk, 0) + ?
-        WHERE pr_ide = ? AND pr_emp = ? AND deleted_at IS NULL AND pr_ret = 1 AND pr_vac >= ?');
-
-    mysqli_stmt_bind_param($stmt, 'iiiii', $cantidad, $cantidad, $productoId, $companyId, $cantidad);
-
     // The refill and its "llenado" movement are saved together
     mysqli_autocommit($con, false);
 
-    if (!mysqli_stmt_execute($stmt)) {
-        mysqli_rollback($con);
+    $llenado = llenar_envases($con, $companyId, $productoId, $nombre, $cantidad);
 
-        send_json(["success"=>false,"error"=>mysqli_stmt_error($stmt)],500);
-    }
-
-    if (mysqli_stmt_affected_rows($stmt) === 0) {
+    if ($llenado === 'sin_vacios') {
         mysqli_rollback($con);
 
         send_json(["success"=>false,"error"=>"No hay suficientes envases vacíos"],409);
     }
 
-    if (!record_stock_movement($con, $companyId, $nombre, 'llenado', $cantidad) || !mysqli_commit($con)) {
+    if ($llenado !== 'ok' || !mysqli_commit($con)) {
         mysqli_rollback($con);
 
         send_json(["success"=>false,"error"=>mysqli_error($con)],500);

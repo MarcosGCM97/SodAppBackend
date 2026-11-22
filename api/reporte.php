@@ -152,6 +152,32 @@ $detalle = array_map(function ($r) {
 
 $rangoComp = limites($compDesde, $compHasta);
 list($compVendido, $compVentas) = totales_ventas($con, $companyId, $rangoComp);
+$compCobrado = total_cobrado($con, $companyId, $rangoComp);
+
+// Business expenses (sap_gs00, migration 014) for the net cash figure: cobrado - gastos. This is
+// cash flow, not profit (a purchase is paid now and sold later). Only users who may see the
+// gastos (gastos.ver) get it; otherwise "gastos" is null, so caja.ver alone never exposes them.
+function total_gastos($con, $companyId, $rango) {
+    $r = filas($con, 'SELECT COALESCE(SUM(gs_mon), 0) AS total FROM sap_gs00
+        WHERE gs_emp = ? AND gs_fec >= ? AND gs_fec < ?', $companyId, $rango)[0];
+    return dinero($r['total']);
+}
+
+$gastos = null;
+if (has_permission('gastos.ver')) {
+    $totalGastos = total_gastos($con, $companyId, $rango);
+    $compGastos = total_gastos($con, $companyId, $rangoComp);
+    $gastos = [
+        "total" => $totalGastos,
+        "neto" => dinero($cobrado - $totalGastos),
+        "anterior" => ["total" => $compGastos, "neto" => dinero($compCobrado - $compGastos)],
+        "categorias" => array_map(function ($r) {
+            return ['categoria' => $r['gs_cat'], 'total' => dinero($r['total'])];
+        }, filas($con, 'SELECT gs_cat, SUM(gs_mon) AS total FROM sap_gs00
+            WHERE gs_emp = ? AND gs_fec >= ? AND gs_fec < ?
+            GROUP BY gs_cat ORDER BY total DESC, gs_cat', $companyId, $rango)),
+    ];
+}
 
 // Payments were not recorded before migration 007: periods before this date have no cobros
 $stmt = prepare_or_fail($con, 'SELECT MIN(pg_fec) AS primero FROM sap_pg00 WHERE pg_emp = ?');
@@ -177,9 +203,10 @@ send_json([
         "desde" => $compDesde->format('Y-m-d'),
         "hasta" => $compHasta->format('Y-m-d'),
         "vendido" => $compVendido,
-        "cobrado" => total_cobrado($con, $companyId, $rangoComp),
+        "cobrado" => $compCobrado,
         "ventas" => $compVentas,
     ],
+    "gastos" => $gastos,
     "cobros" => $cobros,
     "productos" => $productos,
     "clientes" => $porCliente,
