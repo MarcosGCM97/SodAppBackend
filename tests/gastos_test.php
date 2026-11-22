@@ -13,6 +13,10 @@
 // Every row created by the test is deleted at the end, so the script is re-runnable.
 // Requires the curl and mysqli extensions. Never point it at production.
 
+// "Today" must be the API's day (api/config.php), not the CLI default timezone (UTC),
+// or the date checks fail every evening after 21:00 in Argentina.
+date_default_timezone_set('America/Argentina/Buenos_Aires');
+
 if (PHP_SAPI === 'cli-server') {
     putenv('DB_HOST=localhost');
     putenv('DB_NAME=sodapp_test');
