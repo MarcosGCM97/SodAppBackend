@@ -562,7 +562,11 @@ expect_status('Vendedor GET cajaMes with the same token -> 200', 200, http('GET'
 $r = http('GET', 'reporte.php', $reporteRange, null, $tokV);
 expect_status('Vendedor GET reporte with caja.ver -> 200', 200, $r);
 $ownerReporte = http('GET', 'reporte.php', $reporteRange, null, $tokA);
-check('Vendedor reporte equals the owner reporte (company scope)', $r[1] !== null && $r[1] === $ownerReporte[1], short($r[2]));
+// The gastos are only for gastos.ver (the owner has it, this role does not): the rest must match
+$sinGastos = function ($body) { unset($body['gastos']); return $body; };
+check('Vendedor reporte equals the owner reporte (company scope)', $r[1] !== null && $sinGastos($r[1]) === $sinGastos($ownerReporte[1]), short($r[2]));
+check('Vendedor reporte without gastos.ver has no gastos, the owner has them', array_key_exists('gastos', $r[1] ?? []) && $r[1]['gastos'] === null
+    && is_array($ownerReporte[1]['gastos'] ?? null), short($r[2]));
 check('Owner reporte of the month has sales', ($ownerReporte[1]['resumen']['ventas'] ?? 0) > 0, short($ownerReporte[2]));
 $r = http('GET', 'sesion.php', [], null, $tokV);
 check('Vendedor sesion shows caja.ver', ($r[1]['permisos'] ?? null) === array_merge(VENDEDOR, ['caja.ver']), short($r[2]));

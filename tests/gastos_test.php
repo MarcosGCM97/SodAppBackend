@@ -522,5 +522,36 @@ expect_forbidden('User without stock.editar PUTs a compra without producto into 
 check('Forbidden PUT kept the compra without producto', db_row('SELECT gs_mon, gs_pro FROM sap_gs00 WHERE gs_ide = ?', 'i', [$gSinProducto])
     === ['gs_mon' => '750.00', 'gs_pro' => null] && stock($noRetId) === [3, 0]);
 
+// ---------------------------------------------------------------- 7. reporte.php: gastos and net cash
+
+echo "\n# reporte.php adds the gastos of the period and the net cash (gastos.ver only)\n";
+
+// May 2096 (31 days) compares with 2096-03-31..2096-04-30; no sales or payments in those dates
+foreach ([['combustible', 1000, '2096-05-04'], ['vehiculo', 2500.5, '2096-05-05'], ['combustible', 500, '2096-05-31'],
+          ['otro', 300, '2096-04-30'], ['otro', 99, '2096-06-01']] as [$cat, $mon, $fec]) {
+    expect_status("Owner POSTs $cat $mon on $fec", 201, http('POST', 'gastos.php', [], ['categoria' => $cat, 'monto' => $mon, 'fecha' => $fec], $tokA));
+}
+$mayo = ['desde' => '2096-05-01', 'hasta' => '2096-05-31'];
+$r = http('GET', 'reporte.php', $mayo, null, $tokA);
+expect_status('Owner GETs the report of May 2096', 200, $r);
+// Outside the period: 2096-04-30 counts in the previous one, 2096-06-01 in none
+check('Report gastos: total, net cash and the previous period', money($r[1]['gastos']['total'] ?? null) === 4000.5
+    && money($r[1]['gastos']['neto'] ?? null) === -4000.5
+    && money($r[1]['gastos']['anterior']['total'] ?? null) === 300.0 && money($r[1]['gastos']['anterior']['neto'] ?? null) === -300.0, short($r[2]));
+check('Report gastos by category, largest first', array_map(function ($c) { return [$c['categoria'] ?? null, money($c['total'] ?? null)]; },
+    $r[1]['gastos']['categorias'] ?? []) === [['vehiculo', 2500.5], ['combustible', 1500.0]], short($r[2]));
+check('Report net cash is cobrado minus gastos', money($r[1]['gastos']['neto'] ?? null) === round(($r[1]['resumen']['cobrado'] ?? 0) - 4000.5, 2), short($r[2]));
+check('Report keeps its sales figures', ($r[1]['resumen']['ventas'] ?? -1) === 0 && money($r[1]['resumen']['vendido'] ?? null) === 0.0, short($r[2]));
+$r = http('GET', 'reporte.php', $mayo, null, $tokC);
+check("Congre's report has none of Ariza's gastos", $r[0] === 200 && money($r[1]['gastos']['total'] ?? null) === 0.0
+    && ($r[1]['gastos']['categorias'] ?? null) === [], short($r[2]));
+
+expect_status('Owner gives the role caja.ver without gastos.ver', 200, http('PUT', 'roles.php', [], ['id' => $rolId, 'nombre' => MARKER . 'rol_' . $suffix, 'permisos' => ['caja.ver']], $tokA));
+$r = http('GET', 'reporte.php', $mayo, null, $tokV);
+check('caja.ver without gastos.ver: report without gastos', $r[0] === 200 && array_key_exists('gastos', $r[1] ?? []) && $r[1]['gastos'] === null, short($r[2]));
+expect_status('Owner gives the role caja.ver and gastos.ver', 200, http('PUT', 'roles.php', [], ['id' => $rolId, 'nombre' => MARKER . 'rol_' . $suffix, 'permisos' => ['caja.ver', 'gastos.ver']], $tokA));
+$r = http('GET', 'reporte.php', $mayo, null, $tokV);
+check('caja.ver and gastos.ver: report with the company gastos', $r[0] === 200 && money($r[1]['gastos']['total'] ?? null) === 4000.5, short($r[2]));
+
 echo "\n$passes passed, $failures failed\n";
 exit($failures > 0 ? 1 : 0);

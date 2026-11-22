@@ -100,6 +100,13 @@ function is_owner() {
     return $user['es_dueno'];
 }
 
+// True when the logged user has the permission code (the owner has every permission). For
+// optional parts of an answer; use require_permission() to guard an endpoint.
+function has_permission($code) {
+    $user = auth_user();
+    return $user['es_dueno'] || in_array($code, $user['permisos'], true);
+}
+
 // Requires one permission code, or any of a list of codes. The owner has every permission.
 // Otherwise sends 403 naming the (first) required code.
 function require_permission($codes) {
