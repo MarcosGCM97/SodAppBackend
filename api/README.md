@@ -179,6 +179,14 @@ Requiere token. Una fila por empresa en `sap_em00` (`em_emp` = id del dueño). L
 - `GET`: cualquier usuario de la empresa → `{"empresa": {"em_nom","em_tel","em_dir"} | null}` (`null` si el dueño nunca la guardó).
 - `PUT` `{"nombre","telefono"?,"direccion"?}`: solo el dueño (si no, 403 `"permiso":"admin"`). Crea o reemplaza los datos y responde `{"empresa": {...}}`. `nombre` obligatorio, 1-80 caracteres (sin espacios al borde); `telefono` hasta 30, solo números, espacios, `+` y `-`; `direccion` hasta 150. Un teléfono o dirección vacío o ausente se guarda `null`. 400 ante datos inválidos.
 
+Contraseña propia del dueño (api/contrasena.php)
+------------------------------------------------
+Requiere token. El dueño cambia su propia contraseña (la app lo ofrece en Datos de la empresa); su fila no se puede cambiar desde `usuarios.php`.
+
+- `PUT` `{"actual","nueva"}`: solo el dueño (si no, 403 `"permiso":"admin"`). Verifica `actual` contra el hash guardado y reemplaza `us_pas` por el hash de `nueva` → `{"success":true}`.
+- 400 `Datos incompletos: actual y nueva` si falta alguna o no es texto; 400 `La contraseña actual es incorrecta` (nunca 401, porque la app cierra la sesión ante un 401); 400 si `nueva` tiene menos de 6 caracteres (la misma regla que `usuarios.php`). Un pedido rechazado no cambia nada.
+- Los tokens emitidos antes del cambio siguen valiendo hasta que vencen.
+
 Plantillas de mensajes de WhatsApp (api/mensajes.php, migración 013)
 --------------------------------------------------------------------
 Requiere token. Una fila por empresa y tipo en `sap_msj00` (`ms_emp` = id del dueño, `ms_tip` = `deuda`, `envases` o `venta`). La app reemplaza las variables al enviar y usa su texto por defecto para los tipos sin plantilla.
