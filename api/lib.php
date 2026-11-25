@@ -109,6 +109,18 @@ function parse_coordenadas($lat, $lng) {
     return [$lat, $lng];
 }
 
+// Length in characters (multibyte aware)
+function text_length($value) {
+    return function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
+}
+
+// Minimum length of a user password (usuarios.php, contrasena.php)
+const USUARIO_CONTRASENA_MIN = 6;
+
+function valid_password($value) {
+    return is_string($value) && text_length($value) >= USUARIO_CONTRASENA_MIN;
+}
+
 // Optional trimmed text of at most $max characters: null when absent or blank, false when too long
 function parse_texto_opcional($value, $max) {
     if ($value === null) return null;
