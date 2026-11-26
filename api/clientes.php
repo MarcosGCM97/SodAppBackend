@@ -9,6 +9,17 @@ $companyId = current_company_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
 
+// A company cannot have two active clients with the same name (another company can). The
+// column collation (utf8mb4_general_ci) ignores case and accents, and TRIM the spaces at the
+// edges. $exceptId skips the client being edited. Sends 409 when the name is taken.
+function require_nombre_cliente_libre($con, $companyId, $nombre, $exceptId = 0) {
+    $stmt = prepare_or_fail($con, 'SELECT 1 FROM sap_cl00 WHERE cl_emp = ? AND is_deleted = 0 AND cl_ide <> ? AND TRIM(cl_nom) = TRIM(?) LIMIT 1');
+    mysqli_stmt_bind_param($stmt, 'iis', $companyId, $exceptId, $nombre);
+    if (mysqli_num_rows(execute_or_fail($con, $stmt)) > 0) {
+        send_json(["success" => false, "error" => "Ya existe un cliente con ese nombre"], 409);
+    }
+}
+
 // GET /api/clientes.php or /api/clientes.php?id=1
 if ($method === 'GET') {
     // also read by the ventas, repartos and cobros screens
@@ -69,6 +80,8 @@ if ($method === 'POST') {
 
     list($lat, $lng) = $coords;
 
+    require_nombre_cliente_libre($con, $companyId, $nombre);
+
     $stmt = prepare_or_fail($con, 'INSERT INTO sap_cl00 SET cl_nom = ?, cl_tel = ?, cl_dir = ?, cl_emp = ?, cl_loc = ?, cl_lat = ?, cl_lng = ?');
 
     mysqli_stmt_bind_param($stmt, 'sssisdd', $nombre, $tel, $dir, $companyId, $loc, $lat, $lng);
@@ -125,16 +138,22 @@ if ($method === 'PUT') {
         $params[] = $coords[1];
     }
 
-    // Ownership check first: an UPDATE with unchanged values affects 0 rows
-    $check = prepare_or_fail($con, 'SELECT 1 FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ?');
+    // Ownership check first: an UPDATE with unchanged values affects 0 rows. It also tells
+    // whether the name changes (same collation and TRIM as the duplicate check).
+    $check = prepare_or_fail($con, 'SELECT TRIM(cl_nom) = TRIM(?) AS mismo_nombre FROM sap_cl00 WHERE cl_ide = ? AND cl_emp = ?');
 
-    mysqli_stmt_bind_param($check, 'ii', $id, $companyId);
+    mysqli_stmt_bind_param($check, 'sii', $nombre, $id, $companyId);
 
     mysqli_stmt_execute($check);
 
     $resCheck = mysqli_stmt_get_result($check);
 
-    if (!$resCheck || mysqli_num_rows($resCheck) === 0) send_json(["success" => false, "error" => "No se encontró el cliente"], 404);
+    $actual = $resCheck ? mysqli_fetch_assoc($resCheck) : null;
+
+    if (!$actual) send_json(["success" => false, "error" => "No se encontró el cliente"], 404);
+
+    // Only a new name is checked, so a duplicate created before this rule can still be saved
+    if (intval($actual['mismo_nombre']) !== 1) require_nombre_cliente_libre($con, $companyId, $nombre, $id);
 
     $stmt = prepare_or_fail($con, "UPDATE sap_cl00 SET $sets WHERE cl_ide = ? AND cl_emp = ?");
 
