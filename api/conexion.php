@@ -25,11 +25,13 @@ class Database {
       }
 
       // Ahora sí puedes usar $con
-      if (!$con->set_charset("utf8")) {
-         printf("Error cargando charset utf8: %s\n", $con->error);
+      // utf8mb4, like the tables: MySQL "utf8" only takes 3-byte characters and rejects emoji
+      // (the default WhatsApp messages have them) with "Incorrect string value"
+      if (!$con->set_charset("utf8mb4")) {
+         printf("Error cargando charset utf8mb4: %s\n", $con->error);
       }
-      
-      $con->query('SET NAMES utf8');
+
+      $con->query('SET NAMES utf8mb4');
 
       // MySQL dates (NOW(), DEFAULT CURRENT_TIMESTAMP such as pg_fec) must use the same
       // clock as PHP dates (vt_fec), whatever timezone the MySQL server runs on.
