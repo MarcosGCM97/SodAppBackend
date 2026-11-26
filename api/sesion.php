@@ -3,7 +3,8 @@ require_once __DIR__ . '/lib.php';
 require_once __DIR__ . '/auth.php';
 allow_cors();
 
-// GET: the logged user and its current permissions, re-read from the database. The app
+// GET: the logged user, its current permissions and the company name (empresa_nombre, null
+// when the owner never saved the company data), re-read from the database. The app
 // calls it when it starts with a saved session, so role changes reach it without a login.
 // 401 when the token is invalid or the user was deactivated or deleted.
 
@@ -19,4 +20,5 @@ send_json([
     "us_nom" => $user['us_nom'],
     "es_dueno" => $user['es_dueno'],
     "permisos" => $user['permisos'],
+    "empresa_nombre" => empresa_nombre($con, $user['us_emp']),
 ]);

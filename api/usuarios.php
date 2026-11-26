@@ -15,20 +15,11 @@ allow_cors();
 
 const USUARIO_NOMBRE_MIN = 3;
 const USUARIO_NOMBRE_MAX = 100;
-const USUARIO_CONTRASENA_MIN = 6;
 
 require_owner();
 $companyId = current_company_id();
 
 $method = $_SERVER['REQUEST_METHOD'];
-
-function text_length($value) {
-    return function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
-}
-
-function valid_password($value) {
-    return is_string($value) && text_length($value) >= USUARIO_CONTRASENA_MIN;
-}
 
 // Positive integer from JSON (int or digit string), or null
 function parse_id($value) {

@@ -109,6 +109,18 @@ function parse_coordenadas($lat, $lng) {
     return [$lat, $lng];
 }
 
+// Length in characters (multibyte aware)
+function text_length($value) {
+    return function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
+}
+
+// Minimum length of a user password (usuarios.php, contrasena.php)
+const USUARIO_CONTRASENA_MIN = 6;
+
+function valid_password($value) {
+    return is_string($value) && text_length($value) >= USUARIO_CONTRASENA_MIN;
+}
+
 // Optional trimmed text of at most $max characters: null when absent or blank, false when too long
 function parse_texto_opcional($value, $max) {
     if ($value === null) return null;
@@ -122,6 +134,23 @@ function parse_texto_opcional($value, $max) {
     $largo = function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
 
     return $largo > $max ? false : $value;
+}
+
+// Company data of a company (sap_em00, datos-empresa): ["em_nom","em_tel","em_dir"] or null
+// when the owner never saved it. Read by empresa.php and by the login/sesion responses.
+function empresa_datos($con, $companyId) {
+    $stmt = prepare_or_fail($con, 'SELECT em_nom, em_tel, em_dir FROM sap_em00 WHERE em_emp = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $companyId);
+    if (!mysqli_stmt_execute($stmt)) send_json(["success" => false, "error" => mysqli_stmt_error($stmt)], 500);
+    $res = mysqli_stmt_get_result($stmt);
+    $row = $res ? mysqli_fetch_assoc($res) : null;
+    return $row ? $row : null;
+}
+
+// Name the app signs WhatsApp messages with: the company name, or null when unset
+function empresa_nombre($con, $companyId) {
+    $datos = empresa_datos($con, $companyId);
+    return $datos ? $datos['em_nom'] : null;
 }
 
 // Records a stock movement of the owner's product in sap_ms00 (historial de stock).

@@ -139,8 +139,10 @@ Endpoint -> permission ("any of" for reference reads that several screens need):
 | `usuarios.php`, `roles.php` | every method | owner only (`admin`) |
 
 Login and session:
-- `POST login.php` (and the legacy `GET login.php?nombre=&contraseña=`) answers `{"success":true,"message","usuario":{"us_ide","us_nom","us_emp","us_rol","us_act"},"token","es_dueno":bool,"permisos":[codes]}`; the owner gets the whole catalog. Never returns `us_pas`. Unknown name 404, wrong password 401, inactive user 401 `Usuario inactivo.`.
-- `GET sesion.php` -> `{"success":true,"us_ide":N,"us_nom":"..","es_dueno":bool,"permisos":[..]}`: the current permissions, for an app that starts with a saved session.
+- `POST login.php` (and the legacy `GET login.php?nombre=&contraseña=`) answers `{"success":true,"message","usuario":{"us_ide","us_nom","us_emp","us_rol","us_act"},"token","es_dueno":bool,"permisos":[codes],"empresa_nombre":".."|null}`; the owner gets the whole catalog. Never returns `us_pas`. Unknown name 404, wrong password 401, inactive user 401 `Usuario inactivo.`.
+- `GET sesion.php` -> `{"success":true,"us_ide":N,"us_nom":"..","es_dueno":bool,"permisos":[..],"empresa_nombre":".."|null}`: the current permissions, for an app that starts with a saved session.
+
+`empresa_nombre` is the company name saved in `empresa.php` (migration 012), `null` until the owner saves it; the app signs WhatsApp messages with it and falls back to the user name.
 
 Admin API (owner only):
 - `GET usuarios.php` -> `{"success":true,"usuarios":[{"us_ide","us_nom","us_rol","ro_nom","us_act","es_dueno"}]}` (company users, owner first).
@@ -169,3 +171,26 @@ Gastos del negocio de la empresa del usuario (`sap_gs00`). Categorías: `compra_
 - `PUT {"id", ...los mismos campos}` reemplaza el gasto (`fecha` por defecto la que tenía); `DELETE ?id=` lo borra. 404 si el gasto no es de la empresa.
 - Stock, en la misma transacción que el gasto: compra retornable `lleno` -> `pr_stk` +cantidad, `vacio` -> `pr_vac` +cantidad; compra no retornable -> `pr_stk` +cantidad; recarga (solo retornables) -> `pr_vac` -cantidad y `pr_stk` +cantidad (lo mismo que `envases.php` `llenar`). PUT deshace el efecto anterior y aplica el nuevo solo si cambian categoría, producto, cantidad o estado (corregir monto, fecha o descripción no toca el stock); DELETE lo deshace. `cantidad` va de 1 a 100000. Cada cambio de `pr_stk` queda en `sap_ms00` (`compra`, `llenado`, `compra_eliminada`, `llenado_eliminado`).
 - 409 sin cambios cuando el stock no alcanza: recarga con menos envases vacíos que la cantidad (`No hay suficientes envases vacíos`), o deshacer un gasto cuyo stock ya se vendió o cuyo producto fue eliminado.
+
+Datos de la empresa (api/empresa.php, migración 012)
+-----------------------------------------------------
+Requiere token. Una fila por empresa en `sap_em00` (`em_emp` = id del dueño). La app firma los mensajes de WhatsApp con `em_nom`.
+
+- `GET`: cualquier usuario de la empresa → `{"empresa": {"em_nom","em_tel","em_dir"} | null}` (`null` si el dueño nunca la guardó).
+- `PUT` `{"nombre","telefono"?,"direccion"?}`: solo el dueño (si no, 403 `"permiso":"admin"`). Crea o reemplaza los datos y responde `{"empresa": {...}}`. `nombre` obligatorio, 1-80 caracteres (sin espacios al borde); `telefono` hasta 30, solo números, espacios, `+` y `-`; `direccion` hasta 150. Un teléfono o dirección vacío o ausente se guarda `null`. 400 ante datos inválidos.
+
+Contraseña propia del dueño (api/contrasena.php)
+------------------------------------------------
+Requiere token. El dueño cambia su propia contraseña (la app lo ofrece en Datos de la empresa); su fila no se puede cambiar desde `usuarios.php`.
+
+- `PUT` `{"actual","nueva"}`: solo el dueño (si no, 403 `"permiso":"admin"`). Verifica `actual` contra el hash guardado y reemplaza `us_pas` por el hash de `nueva` → `{"success":true}`.
+- 400 `Datos incompletos: actual y nueva` si falta alguna o no es texto; 400 `La contraseña actual es incorrecta` (nunca 401, porque la app cierra la sesión ante un 401); 400 si `nueva` tiene menos de 6 caracteres (la misma regla que `usuarios.php`). Un pedido rechazado no cambia nada.
+- Los tokens emitidos antes del cambio siguen valiendo hasta que vencen.
+
+Plantillas de mensajes de WhatsApp (api/mensajes.php, migración 013)
+--------------------------------------------------------------------
+Requiere token. Una fila por empresa y tipo en `sap_msj00` (`ms_emp` = id del dueño, `ms_tip` = `deuda`, `envases` o `venta`). La app reemplaza las variables al enviar y usa su texto por defecto para los tipos sin plantilla.
+
+- `GET`: cualquier usuario de la empresa → `{"plantillas": {"deuda": "..", "venta": ".."}}` (solo los tipos guardados; `{}` sin plantillas).
+- `PUT` `{"tipo","texto"}`: solo el dueño (si no, 403 `"permiso":"admin"`). Crea o reemplaza la plantilla del tipo y responde `{"plantillas": {...}}` con todas. `texto` obligatorio, 1-1000 caracteres (sin espacios al borde). Variables permitidas: `deuda` `{cliente}`, `{saldo}`, `{empresa}`; `envases` `{cliente}`, `{envases}`, `{empresa}`; `venta` `{cliente}`, `{productos}`, `{total}`, `{saldo}`, `{empresa}`. Otra `{palabra}` → 400 `Variable no permitida en <tipo>: {palabra}. Permitidas: ...`; llaves sin una palabra adentro son texto. Tipo desconocido → 400 `Tipo inválido: deuda, envases o venta`.
+- `DELETE ?tipo=<tipo>`: solo el dueño. Borra la plantilla (la app vuelve al texto por defecto) y responde `{"plantillas": {...}}`; borrar una que no existe no es error.
