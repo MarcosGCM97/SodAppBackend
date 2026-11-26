@@ -76,6 +76,12 @@ Clientes: localidad y coordenadas (migración 009)
 - `POST` acepta opcionales `localidadCl`, `latitudCl`, `longitudCl`. `PUT` acepta opcionales `cl_loc`, `cl_lat`, `cl_lng`: una clave que no se envía deja el valor como está (versiones viejas de la app); `null` lo borra.
 - Latitud y longitud van siempre juntas, en grados (-90..90, -180..180); si no, 400. Localidad: hasta 100 caracteres.
 
+Clientes: nombre único por empresa
+----------------------------------
+- `POST` y `PUT` responden 409 `{"success":false,"error":"Ya existe un cliente con ese nombre"}` y no cambian nada cuando otro cliente activo (`is_deleted = 0`) de la misma empresa ya tiene ese nombre. La comparación ignora mayúsculas, acentos (collation `utf8mb4_general_ci`) y los espacios de los bordes.
+- Otra empresa puede tener un cliente con el mismo nombre, y el nombre de un cliente borrado se puede volver a usar.
+- `PUT` solo controla un nombre nuevo: guardar un cliente con su propio nombre siempre funciona, también para los duplicados cargados antes de esta regla. El 404 de un cliente ajeno se responde antes que el 409.
+
 Deuda con centavos (migración 010)
 ----------------------------------
 - `cl_deb` es `DECIMAL(12,2)`: las ventas, los pagos y las ventas borradas con `revertir_deuda` mueven el monto exacto, sin redondear a enteros. Las lecturas devuelven `cl_deb` con dos decimales (`"4500.00"`).
